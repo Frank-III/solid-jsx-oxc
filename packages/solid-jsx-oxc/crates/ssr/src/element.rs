@@ -10,7 +10,7 @@ use oxc_ast::ast::{
 
 use common::{
     TransformOptions,
-    is_svg_element, expr_to_string,
+    is_svg_element, expr_to_string, get_attr_name,
     constants::{PROPERTIES, CHILD_PROPERTIES, ALIASES, VOID_ELEMENTS},
     expression::escape_html,
 };
@@ -117,12 +117,7 @@ fn transform_attribute<'a>(
     _options: &TransformOptions<'a>,
     is_svg: bool,
 ) {
-    let key = match &attr.name {
-        JSXAttributeName::Identifier(id) => id.name.to_string(),
-        JSXAttributeName::NamespacedName(ns) => {
-            format!("{}:{}", ns.namespace.name, ns.name.name)
-        }
-    };
+    let key = get_attr_name(&attr.name);
 
     // Skip client-only attributes
     if key == "ref" || key.starts_with("on") || key.starts_with("use:") || key.starts_with("prop:") {
@@ -232,12 +227,25 @@ fn transform_children<'a>(
     }
 
     // Process children
-    for child in &element.children {
+    let skip_escape = result.skip_escape;
+    process_jsx_children(&element.children, result, skip_escape, context, options);
+}
+
+/// Process a list of JSX children, appending to the result.
+/// This is extracted as a helper to enable recursive processing of fragment children.
+fn process_jsx_children<'a>(
+    children: &oxc_allocator::Vec<'a, oxc_ast::ast::JSXChild<'a>>,
+    result: &mut SSRResult,
+    skip_escape: bool,
+    context: &SSRContext,
+    options: &TransformOptions<'a>,
+) {
+    for child in children {
         match child {
             oxc_ast::ast::JSXChild::Text(text) => {
                 let content = common::expression::trim_whitespace(&text.value);
                 if !content.is_empty() {
-                    if result.skip_escape {
+                    if skip_escape {
                         result.push_static(&content);
                     } else {
                         result.push_static(&escape_html(&content, false));
@@ -277,7 +285,7 @@ fn transform_children<'a>(
                     let expr_str = expr_to_string(expr);
                     context.register_helper("escape");
 
-                    if result.skip_escape {
+                    if skip_escape {
                         // Inside script/style - don't escape
                         result.push_dynamic(expr_str, false, true);
                     } else {
@@ -288,10 +296,8 @@ fn transform_children<'a>(
             }
 
             oxc_ast::ast::JSXChild::Fragment(fragment) => {
-                // Recursively process fragment children
-                for _frag_child in &fragment.children {
-                    // TODO: Handle fragment children similarly
-                }
+                // Recursively process fragment children with same escape settings
+                process_jsx_children(&fragment.children, result, skip_escape, context, options);
             }
 
             _ => {}

@@ -18,9 +18,6 @@ pub use common::TransformOptions;
 #[cfg(feature = "napi")]
 use napi_derive::napi;
 
-#[cfg(feature = "napi")]
-use napi::Env;
-
 use oxc_allocator::Allocator;
 use oxc_codegen::{Codegen, CodegenReturn, CodegenOptions, IndentChar};
 use oxc_parser::Parser;
@@ -127,6 +124,13 @@ fn transform_internal(source: &str, options: &TransformOptions) -> CodegenReturn
         .program;
 
     // Run the appropriate transform based on generate mode
+    // SAFETY: We create a raw pointer to `options` and dereference it to get a reference
+    // with an independent lifetime. This is safe because:
+    // 1. `options` is borrowed for the entire duration of this function
+    // 2. The reference is only used within this function's scope
+    // 3. The transformers don't outlive this function
+    // This pattern is used to work around Rust's borrow checker limitations with
+    // multiple mutable borrows needed during AST traversal.
     let options_ref = unsafe { &*(options as *const TransformOptions) };
 
     match options.generate {
@@ -161,11 +165,6 @@ fn transform_internal(source: &str, options: &TransformOptions) -> CodegenReturn
         .build(&program)
 }
 
-/// Build configuration for NAPI
-#[cfg(feature = "napi")]
-pub fn build() {
-    napi_build::setup();
-}
 
 #[cfg(test)]
 mod tests {

@@ -8,12 +8,35 @@
 // Try to load the native module
 let nativeBinding = null;
 
+// Detect platform and architecture
+const platform = process.platform;
+const arch = process.arch;
+
+// Map Node.js platform/arch to binary file suffix
+const platformMap = {
+  'darwin-arm64': 'darwin-arm64',
+  'darwin-x64': 'darwin-x64',
+  'linux-x64': 'linux-x64-gnu',
+  'linux-arm64': 'linux-arm64-gnu',
+  'win32-x64': 'win32-x64-msvc',
+  'win32-arm64': 'win32-arm64-msvc',
+};
+
+const platformKey = `${platform}-${arch}`;
+const nativeTarget = platformMap[platformKey];
+
 try {
-  // The native module will be built for each platform
-  nativeBinding = require('./solid-jsx-oxc.node');
+  if (nativeTarget) {
+    // Try platform-specific binary first
+    nativeBinding = require(`./solid-jsx-oxc.${nativeTarget}.node`);
+  } else {
+    // Fallback to generic name
+    nativeBinding = require('./solid-jsx-oxc.node');
+  }
 } catch (e) {
   // Fallback message if native module not found
-  console.warn('solid-jsx-oxc: Native module not found. Run `npm run build` to compile.');
+  console.warn(`solid-jsx-oxc: Native module not found for ${platformKey}. Run \`npm run build\` to compile.`);
+  console.warn(e.message);
 }
 
 /**
@@ -53,7 +76,20 @@ function transform(source, options = {}) {
   }
 
   const mergedOptions = { ...defaultOptions, ...options };
-  return nativeBinding.transformJsx(source, mergedOptions);
+
+  // Map options to match Rust struct field names (snake_case)
+  const rustOptions = {
+    module_name: mergedOptions.moduleName,
+    generate: mergedOptions.generate,
+    hydratable: mergedOptions.hydratable,
+    delegate_events: mergedOptions.delegateEvents,
+    wrap_conditionals: mergedOptions.wrapConditionals,
+    context_to_custom_elements: mergedOptions.contextToCustomElements,
+    filename: mergedOptions.filename,
+    source_map: mergedOptions.sourceMap,
+  };
+
+  return nativeBinding.transformJsx(source, rustOptions);
 }
 
 /**
@@ -78,6 +114,8 @@ module.exports = {
   transform,
   preset,
   defaultOptions,
+  // Also export the raw binding for advanced usage
+  transformJsx: nativeBinding ? nativeBinding.transformJsx : null,
 };
 
 // Also export as default for ESM compatibility

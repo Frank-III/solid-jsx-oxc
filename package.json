@@ -9,9 +9,12 @@
     "url": "https://github.com/ryansolid/dom-expressions"
   },
   "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "postinstall": "lerna bootstrap --no-ci",
-    "clean": "pnpm run clean:artifacts && pnpm run clean:packages && pnpm run clean:root",
+    "clean": "bun run clean:artifacts && bun run clean:packages && bun run clean:root",
     "clean:artifacts": "lerna run clean --parallel",
     "clean:packages": "lerna clean --yes",
     "clean:root": "rimraf node_modules",
@@ -21,7 +24,7 @@
     "publish:release": "lerna run build && lerna publish",
     "report:coverage": "lerna run report:coverage --parallel",
     "bootstrap": "lerna bootstrap",
-    "init": "pnpm install && pnpm run bootstrap",
+    "init": "bun install && bun run bootstrap",
     "jsx-sync-types": "node packages/dom-expressions/src/jsx-update.mjs"
   },
   "devDependencies": {

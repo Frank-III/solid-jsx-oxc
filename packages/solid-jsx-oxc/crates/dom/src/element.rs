@@ -8,7 +8,7 @@ use oxc_ast::ast::{
 
 use common::{
     TransformOptions,
-    is_svg_element, is_dynamic, expr_to_string,
+    is_svg_element, is_dynamic, expr_to_string, get_attr_name, is_namespaced_attr,
     constants::{ALIASES, DELEGATED_EVENTS, VOID_ELEMENTS},
     expression::{escape_html, to_event_name},
 };
@@ -93,13 +93,11 @@ fn element_needs_runtime_access(element: &JSXElement) -> bool {
     for attr in &element.opening_element.attributes {
         match attr {
             JSXAttributeItem::Attribute(attr) => {
-                let key = match &attr.name {
-                    JSXAttributeName::Identifier(id) => id.name.as_str(),
-                    JSXAttributeName::NamespacedName(ns) => {
-                        // Namespaced attributes like on:click or use:directive always need access
-                        return true;
-                    }
-                };
+                // Namespaced attributes like on:click or use:directive always need access
+                if is_namespaced_attr(&attr.name) {
+                    return true;
+                }
+                let key = get_attr_name(&attr.name);
 
                 // ref needs access
                 if key == "ref" {
@@ -169,12 +167,7 @@ fn transform_attribute<'a>(
     context: &BlockContext,
     options: &TransformOptions<'a>,
 ) {
-    let key = match &attr.name {
-        JSXAttributeName::Identifier(id) => id.name.to_string(),
-        JSXAttributeName::NamespacedName(ns) => {
-            format!("{}:{}", ns.namespace.name, ns.name.name)
-        }
-    };
+    let key = get_attr_name(&attr.name);
 
     // Handle different attribute types
     if key == "ref" {

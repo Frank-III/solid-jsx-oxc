@@ -5,107 +5,111 @@
 export interface TransformOptions {
   /**
    * The module to import runtime helpers from
-   * @default 'solid-js/web'
+   * @default "solid-js/web"
    */
   moduleName?: string;
 
   /**
-   * Generate mode
-   * @default 'dom'
+   * Generate mode: "dom", "ssr", or "universal"
+   * @default "dom"
    */
   generate?: 'dom' | 'ssr' | 'universal';
 
   /**
-   * Enable hydration support
+   * Whether to enable hydration support
    * @default false
    */
   hydratable?: boolean;
 
   /**
-   * Delegate events for better performance
+   * Whether to delegate events
    * @default true
    */
   delegateEvents?: boolean;
 
   /**
-   * Additional events to delegate
-   */
-  delegatedEvents?: string[];
-
-  /**
-   * Wrap conditionals in memos
+   * Whether to wrap conditionals
    * @default true
    */
   wrapConditionals?: boolean;
 
   /**
-   * Pass context to custom elements
+   * Whether to pass context to custom elements
    * @default true
    */
   contextToCustomElements?: boolean;
 
   /**
-   * Built-in components that should be passed through
-   */
-  builtIns?: string[];
-
-  /**
-   * Source filename for source maps
+   * Source filename
+   * @default "input.jsx"
    */
   filename?: string;
 
   /**
-   * Enable source maps
+   * Whether to generate source maps
    * @default false
    */
   sourceMap?: boolean;
+
+  /**
+   * Built-in components that receive special handling
+   */
+  builtIns?: string[];
 }
 
 export interface TransformResult {
-  /**
-   * The transformed code
-   */
+  /** The transformed code */
   code: string;
-
-  /**
-   * Source map (if sourceMap was enabled)
-   */
+  /** Source map (if enabled) */
   map?: string;
 }
-
-export interface PresetResult {
-  /**
-   * The merged options
-   */
-  options: TransformOptions;
-
-  /**
-   * Transform function with the preset options
-   */
-  transform: (source: string) => TransformResult;
-}
-
-/**
- * Default transform options
- */
-export const defaultOptions: TransformOptions;
 
 /**
  * Transform JSX source code
  * @param source - The source code to transform
  * @param options - Transform options
+ * @returns The transformed code and optional source map
  */
 export function transform(source: string, options?: TransformOptions): TransformResult;
 
 /**
- * Create a preset configuration (for compatibility with babel-preset-solid)
+ * Low-level transform function from the native binding.
+ * Prefers snake_case option names.
+ */
+export function transformJsx(source: string, options?: {
+  module_name?: string;
+  generate?: string;
+  hydratable?: boolean;
+  delegate_events?: boolean;
+  wrap_conditionals?: boolean;
+  context_to_custom_elements?: boolean;
+  filename?: string;
+  source_map?: boolean;
+} | null): TransformResult;
+
+export interface PresetResult {
+  options: TransformOptions;
+  transform: (source: string) => TransformResult;
+}
+
+/**
+ * Create a preset configuration (for compatibility with babel-preset-solid interface)
  * @param context - Babel context (ignored, for compatibility)
  * @param options - User options
+ * @returns Preset configuration with options and transform function
  */
 export function preset(context: unknown, options?: TransformOptions): PresetResult;
 
-export default {
-  transform,
-  preset,
-  defaultOptions,
+/**
+ * Default options matching babel-preset-solid
+ */
+export const defaultOptions: Required<Omit<TransformOptions, 'filename'>>;
+
+declare const _default: {
+  transform: typeof transform;
+  preset: typeof preset;
+  defaultOptions: typeof defaultOptions;
+  transformJsx: typeof transformJsx;
 };
+
+export default _default;

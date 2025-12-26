@@ -1,6 +1,6 @@
 //! Expression utilities for working with OXC AST
 
-use oxc_ast::ast::{Expression, Statement};
+use oxc_ast::ast::{Expression, Statement, JSXElement, JSXChild};
 use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_span::Span;
 
@@ -110,4 +110,21 @@ pub fn to_event_name(name: &str) -> String {
 pub fn to_property_name(name: &str) -> String {
     // Already camelCase, just return
     name.to_string()
+}
+
+/// Get children as a callback expression from a JSX element.
+///
+/// Used for control flow components (For, Index, etc.) that expect
+/// arrow function children like: `<For each={items}>{item => <div>{item}</div>}</For>`
+///
+/// Returns the expression string, or "() => undefined" if no expression child found.
+pub fn get_children_callback(element: &JSXElement<'_>) -> String {
+    for child in &element.children {
+        if let JSXChild::ExpressionContainer(container) = child {
+            if let Some(expr) = container.expression.as_expression() {
+                return expr_to_string(expr);
+            }
+        }
+    }
+    "() => undefined".to_string()
 }

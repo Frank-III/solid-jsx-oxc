@@ -1,9 +1,13 @@
 //! Check functions for JSX nodes
 //! Ported from dom-expressions/src/shared/utils.js
 
-use oxc_ast::ast::{JSXElement, JSXElementName, JSXMemberExpression, JSXMemberExpressionObject, Expression};
+use oxc_ast::ast::{
+    JSXElement, JSXElementName, JSXMemberExpression, JSXMemberExpressionObject,
+    Expression, JSXAttribute, JSXAttributeItem, JSXAttributeName, JSXAttributeValue,
+};
 
 use crate::constants::{BUILT_INS, SVG_ELEMENTS};
+use crate::expression::expr_to_string;
 
 /// Check if a tag name represents a component (starts with uppercase or contains dot)
 pub fn is_component(tag: &str) -> bool {
@@ -127,4 +131,63 @@ pub fn is_dynamic(expr: &Expression) -> bool {
         // Default to dynamic for safety
         _ => true,
     }
+}
+
+/// Find a JSX attribute by name on an element.
+///
+/// Returns the attribute if found, allowing access to both the name and value.
+pub fn find_prop<'a>(element: &'a JSXElement<'a>, name: &str) -> Option<&'a JSXAttribute<'a>> {
+    for attr in &element.opening_element.attributes {
+        if let JSXAttributeItem::Attribute(attr) = attr {
+            if let JSXAttributeName::Identifier(id) = &attr.name {
+                if id.name == name {
+                    return Some(attr);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Find a JSX attribute by name and return its value as a string.
+///
+/// Handles expression containers, string literals, and boolean attributes (no value = true).
+pub fn find_prop_value(element: &JSXElement<'_>, name: &str) -> Option<String> {
+    find_prop(element, name).and_then(|attr| get_attr_value(attr))
+}
+
+/// Get the value of a JSX attribute as a string.
+///
+/// - Expression containers: returns the expression as a string
+/// - String literals: returns the quoted string
+/// - No value (boolean): returns "true"
+pub fn get_attr_value(attr: &JSXAttribute<'_>) -> Option<String> {
+    match &attr.value {
+        Some(JSXAttributeValue::ExpressionContainer(container)) => {
+            container.expression.as_expression().map(|e| expr_to_string(e))
+        }
+        Some(JSXAttributeValue::StringLiteral(lit)) => {
+            Some(format!("\"{}\"", lit.value))
+        }
+        None => Some("true".to_string()),
+        _ => None,
+    }
+}
+
+/// Get the full name of a JSX attribute (including namespace if present).
+///
+/// - `id` -> "id"
+/// - `on:click` -> "on:click"
+pub fn get_attr_name(name: &JSXAttributeName) -> String {
+    match name {
+        JSXAttributeName::Identifier(id) => id.name.to_string(),
+        JSXAttributeName::NamespacedName(ns) => {
+            format!("{}:{}", ns.namespace.name, ns.name.name)
+        }
+    }
+}
+
+/// Check if a JSX attribute name is namespaced (e.g., `on:click`, `use:directive`).
+pub fn is_namespaced_attr(name: &JSXAttributeName) -> bool {
+    matches!(name, JSXAttributeName::NamespacedName(_))
 }

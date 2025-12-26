@@ -36,7 +36,13 @@ impl<'a> SolidTransform<'a> {
 
     /// Run the transform on a program
     pub fn transform(mut self, program: &mut Program<'a>) {
-        // Store allocator as raw pointer to avoid borrow conflicts
+        // SAFETY: We convert the allocator reference to a raw pointer and back to a reference
+        // to satisfy oxc_traverse's API which requires `&Allocator` while we hold `&mut self`.
+        // This is safe because:
+        // 1. The allocator lives for 'a which outlives this entire transform operation
+        // 2. oxc_traverse only uses the allocator for read-only arena access
+        // 3. We don't mutate the allocator through any path during traversal
+        // 4. The pointer is never escaped or stored beyond this call
         let allocator = self.allocator as *const Allocator;
         traverse_mut(
             &mut self,
@@ -312,6 +318,8 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
         let helpers = self.context.helpers.borrow();
 
         // Build import statement: import { template, effect, ... } from 'solid-js/web';
+        // NOTE: This import building logic is duplicated with SSR transform.
+        // Extraction is non-trivial due to OXC's lifetime requirements.
         if !helpers.is_empty() {
             let module_name = self.options.module_name;
 

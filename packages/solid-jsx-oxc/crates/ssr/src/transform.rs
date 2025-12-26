@@ -37,6 +37,13 @@ impl<'a> SSRTransform<'a> {
 
     /// Run the transform on a program
     pub fn transform(mut self, program: &mut Program<'a>) {
+        // SAFETY: We convert the allocator reference to a raw pointer and back to a reference
+        // to satisfy oxc_traverse's API which requires `&Allocator` while we hold `&mut self`.
+        // This is safe because:
+        // 1. The allocator lives for 'a which outlives this entire transform operation
+        // 2. oxc_traverse only uses the allocator for read-only arena access
+        // 3. We don't mutate the allocator through any path during traversal
+        // 4. The pointer is never escaped or stored beyond this call
         let allocator = self.allocator as *const Allocator;
         traverse_mut(
             &mut self,
@@ -174,6 +181,8 @@ impl<'a> Traverse<'a, ()> for SSRTransform<'a> {
         }
 
         // Build import statement: import { ssr, escape, ... } from 'solid-js/web';
+        // NOTE: This import building logic is duplicated with DOM transform.
+        // Extraction is non-trivial due to OXC's lifetime requirements.
         let ast = ctx.ast;
         let span = Span::default();
         let module_name = self.options.module_name;

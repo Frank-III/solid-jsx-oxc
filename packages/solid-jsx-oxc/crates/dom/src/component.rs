@@ -6,7 +6,7 @@ use oxc_ast::ast::{
     JSXAttributeValue, JSXChild,
 };
 
-use common::{TransformOptions, is_built_in, is_dynamic, expr_to_string};
+use common::{TransformOptions, is_built_in, is_dynamic, expr_to_string, get_children_callback, find_prop};
 
 use crate::ir::{BlockContext, TransformResult, Expr, ChildTransformer};
 
@@ -415,32 +415,4 @@ fn get_children_expr_transformed<'a, 'b>(
     }
 }
 
-/// Find a prop by name
-fn find_prop<'a>(element: &'a JSXElement<'a>, name: &str) -> Option<&'a JSXAttribute<'a>> {
-    for attr in &element.opening_element.attributes {
-        if let JSXAttributeItem::Attribute(attr) = attr {
-            if let JSXAttributeName::Identifier(id) = &attr.name {
-                if id.name == name {
-                    return Some(attr);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Get children as a callback function (for For, Index, etc.)
-fn get_children_callback<'a>(element: &JSXElement<'a>) -> String {
-    // The children of For/Index should be an arrow function
-    // <For each={items}>{item => <div>{item}</div>}</For>
-    for child in &element.children {
-        if let JSXChild::ExpressionContainer(container) = child {
-            if let Some(expr) = container.expression.as_expression() {
-                // This should be an arrow function like: item => <div>{item}</div>
-                return expr_to_string(expr);
-            }
-        }
-    }
-    // If no expression child found, return a no-op function
-    "() => undefined".to_string()
-}
+// find_prop and get_children_callback moved to common module

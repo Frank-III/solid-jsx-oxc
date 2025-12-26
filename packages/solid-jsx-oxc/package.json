@@ -1,6 +1,6 @@
 {
   "name": "solid-jsx-oxc",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.1",
   "description": "OXC-based JSX compiler for SolidJS",
   "main": "index.js",
   "types": "index.d.ts",
@@ -15,6 +15,7 @@
     "index.js",
     "index.mjs",
     "index.d.ts",
+    "binding.d.ts",
     "*.node"
   ],
   "repository": {
@@ -34,28 +35,30 @@
   "author": "SolidJS Contributors",
   "license": "MIT",
   "napi": {
-    "name": "solid-jsx-oxc",
-    "triples": {
-      "defaults": true,
-      "additional": [
-        "aarch64-apple-darwin",
-        "aarch64-unknown-linux-gnu",
-        "aarch64-unknown-linux-musl",
-        "aarch64-pc-windows-msvc",
-        "x86_64-unknown-linux-musl",
-        "x86_64-unknown-freebsd",
-        "i686-pc-windows-msvc",
-        "armv7-unknown-linux-gnueabihf"
-      ]
-    }
+    "binaryName": "solid-jsx-oxc",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc",
+      "aarch64-unknown-linux-gnu",
+      "aarch64-pc-windows-msvc"
+    ]
   },
   "scripts": {
     "artifacts": "napi artifacts",
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
-    "prepublishOnly": "napi prepublish -t npm",
+    "build": "napi build --platform --release --features napi --no-js --dts binding.d.ts",
+    "build:debug": "napi build --platform --features napi --no-js --dts binding.d.ts",
+    "clean": "rm -f *.node",
+    "rebuild": "bun run clean && bun run build",
     "test": "cargo test",
-    "bench": "cargo bench"
+    "test:js": "bun run verify",
+    "verify": "bun scripts/verify.mjs",
+    "bench": "cargo bench",
+    "release": "bun scripts/release.mjs",
+    "release:alpha": "bun scripts/release.mjs alpha",
+    "release:beta": "bun scripts/release.mjs beta",
+    "release:next": "bun scripts/release.mjs next"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.0.0-alpha.69"
