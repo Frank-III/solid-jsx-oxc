@@ -5,15 +5,34 @@
  * It provides the same interface as babel-preset-solid.
  */
 
+const { platform, arch } = process;
+
+// Platform/arch to NAPI target mapping
+const platformArchMap = {
+  'darwin-arm64': 'darwin-arm64',
+  'darwin-x64': 'darwin-x64',
+  'linux-arm64': 'linux-arm64-gnu',
+  'linux-x64': 'linux-x64-gnu',
+  'win32-x64': 'win32-x64-msvc',
+  'win32-arm64': 'win32-arm64-msvc',
+};
+
+const target = platformArchMap[`${platform}-${arch}`] || `${platform}-${arch}`;
+
 // Try to load the native module
 let nativeBinding = null;
 
 try {
-  // The native module will be built for each platform
-  nativeBinding = require('./solid-jsx-oxc.node');
-} catch (e) {
-  // Fallback message if native module not found
-  console.warn('solid-jsx-oxc: Native module not found. Run `npm run build` to compile.');
+  // Try platform-specific file first
+  nativeBinding = require(`./solid-jsx-oxc.${target}.node`);
+} catch (e1) {
+  try {
+    // Fallback to generic name
+    nativeBinding = require('./solid-jsx-oxc.node');
+  } catch (e2) {
+    // Fallback message if native module not found
+    console.warn('solid-jsx-oxc: Native module not found. Run `npm run build` to compile.');
+  }
 }
 
 /**

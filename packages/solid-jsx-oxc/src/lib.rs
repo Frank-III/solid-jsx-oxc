@@ -18,8 +18,6 @@ pub use common::TransformOptions;
 #[cfg(feature = "napi")]
 use napi_derive::napi;
 
-#[cfg(feature = "napi")]
-use napi::Env;
 
 use oxc_allocator::Allocator;
 use oxc_codegen::{Codegen, CodegenReturn, CodegenOptions, IndentChar};
@@ -159,12 +157,6 @@ fn transform_internal(source: &str, options: &TransformOptions) -> CodegenReturn
             ..CodegenOptions::default()
         })
         .build(&program)
-}
-
-/// Build configuration for NAPI
-#[cfg(feature = "napi")]
-pub fn build() {
-    napi_build::setup();
 }
 
 #[cfg(test)]

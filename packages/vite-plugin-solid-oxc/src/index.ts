@@ -120,7 +120,7 @@ export default function solidOxc(options: SolidOxcOptions = {}): Plugin {
 
     configResolved(config) {
       isDev = config.command === 'serve';
-      isSSR = opts.ssr ?? config.build?.ssr ?? false;
+      isSSR = opts.ssr ?? !!config.build?.ssr;
     },
 
     async buildStart() {
@@ -190,6 +190,12 @@ if (import.meta.hot) {
         resolve: {
           conditions: ['solid'],
           dedupe: ['solid-js', 'solid-js/web'],
+        },
+        optimizeDeps: {
+          // Include solid-js in pre-bundling
+          include: ['solid-js', 'solid-js/web'],
+          // Disable automatic discovery - we know what deps we need
+          noDiscovery: true,
         },
       };
     },

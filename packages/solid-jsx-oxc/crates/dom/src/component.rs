@@ -90,7 +90,7 @@ fn transform_for<'a, 'b>(
     _transform_child: ChildTransformer<'a, 'b>,
 ) {
     context.register_helper("createComponent");
-    context.register_helper("For");
+    // Note: For is a user-imported component from solid-js, not a runtime helper
 
     let each_expr = get_prop_expr(element, "each");
     let children = get_children_callback(element);
@@ -111,7 +111,6 @@ fn transform_show<'a, 'b>(
     transform_child: ChildTransformer<'a, 'b>,
 ) {
     context.register_helper("createComponent");
-    context.register_helper("Show");
 
     let when_expr = get_prop_expr(element, "when");
     let fallback_expr = get_prop_expr(element, "fallback");
@@ -133,7 +132,6 @@ fn transform_switch<'a, 'b>(
     transform_child: ChildTransformer<'a, 'b>,
 ) {
     context.register_helper("createComponent");
-    context.register_helper("Switch");
 
     let children = get_children_expr_transformed(element, context, transform_child);
 
@@ -153,7 +151,6 @@ fn transform_match<'a, 'b>(
     transform_child: ChildTransformer<'a, 'b>,
 ) {
     context.register_helper("createComponent");
-    context.register_helper("Match");
 
     let when_expr = get_prop_expr(element, "when");
     let children = get_children_expr_transformed(element, context, transform_child);
@@ -174,7 +171,6 @@ fn transform_index<'a, 'b>(
     _transform_child: ChildTransformer<'a, 'b>,
 ) {
     context.register_helper("createComponent");
-    context.register_helper("Index");
 
     let each_expr = get_prop_expr(element, "each");
     let children = get_children_callback(element);
@@ -195,7 +191,6 @@ fn transform_suspense<'a, 'b>(
     transform_child: ChildTransformer<'a, 'b>,
 ) {
     context.register_helper("createComponent");
-    context.register_helper("Suspense");
 
     let fallback_expr = get_prop_expr(element, "fallback");
     let children = get_children_expr_transformed(element, context, transform_child);
@@ -216,7 +211,6 @@ fn transform_portal<'a, 'b>(
     transform_child: ChildTransformer<'a, 'b>,
 ) {
     context.register_helper("createComponent");
-    context.register_helper("Portal");
 
     let mount_expr = get_prop_expr(element, "mount");
     let children = get_children_expr_transformed(element, context, transform_child);
@@ -238,7 +232,6 @@ fn transform_dynamic<'a, 'b>(
     transform_child: ChildTransformer<'a, 'b>,
 ) {
     context.register_helper("createComponent");
-    context.register_helper("Dynamic");
 
     let component_expr = get_prop_expr(element, "component");
     let props = build_props(element, context, options, transform_child);
@@ -259,7 +252,6 @@ fn transform_error_boundary<'a, 'b>(
     transform_child: ChildTransformer<'a, 'b>,
 ) {
     context.register_helper("createComponent");
-    context.register_helper("ErrorBoundary");
 
     let fallback_expr = get_prop_expr(element, "fallback");
     let children = get_children_expr_transformed(element, context, transform_child);
