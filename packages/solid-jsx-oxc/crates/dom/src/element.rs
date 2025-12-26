@@ -192,6 +192,11 @@ fn transform_attribute<'a>(
         return;
     }
 
+    if key.starts_with("prop:") {
+        transform_property_binding(attr, &key, elem_id, result, context);
+        return;
+    }
+
     // Handle style attribute specially
     if key == "style" {
         transform_style(attr, elem_id, result, context);
@@ -341,6 +346,52 @@ fn transform_directive<'a>(
             directive_name, elem_id, value
         ),
     });
+}
+
+/// Transform prop: property binding
+/// e.g., prop:value={val} -> element.value = val
+fn transform_property_binding<'a>(
+    attr: &JSXAttribute<'a>,
+    key: &str,
+    elem_id: &str,
+    result: &mut TransformResult,
+    context: &BlockContext,
+) {
+    let prop_name = &key[5..]; // Strip "prop:"
+
+    match &attr.value {
+        Some(JSXAttributeValue::ExpressionContainer(container)) => {
+            if let Some(expr) = container.expression.as_expression() {
+                let expr_str = expr_to_string(expr);
+
+                if is_dynamic(expr) {
+                    // Dynamic property - wrap in effect
+                    context.register_helper("effect");
+                    result.exprs.push(Expr {
+                        code: format!("effect(() => {}.{} = {})", elem_id, prop_name, expr_str),
+                    });
+                } else {
+                    // Static expression - direct assignment
+                    result.exprs.push(Expr {
+                        code: format!("{}.{} = {}", elem_id, prop_name, expr_str),
+                    });
+                }
+            }
+        }
+        Some(JSXAttributeValue::StringLiteral(lit)) => {
+            // Static string value
+            result.exprs.push(Expr {
+                code: format!("{}.{} = \"{}\"", elem_id, prop_name, escape_html(&lit.value, false)),
+            });
+        }
+        None => {
+            // Boolean property: prop:disabled -> element.disabled = true
+            result.exprs.push(Expr {
+                code: format!("{}.{} = true", elem_id, prop_name),
+            });
+        }
+        _ => {}
+    }
 }
 
 /// Transform style attribute

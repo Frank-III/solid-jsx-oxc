@@ -163,6 +163,40 @@ fn test_dom_ref_callback() {
 }
 
 // ============================================================================
+// DOM: Property Bindings (prop:)
+// ============================================================================
+
+#[test]
+fn test_dom_prop_static() {
+    let code = transform_dom(r#"<input prop:value="hello" />"#);
+    // Should set property directly, not attribute
+    assert!(code.contains(".value = \"hello\""));
+}
+
+#[test]
+fn test_dom_prop_dynamic() {
+    let code = transform_dom(r#"<input prop:value={value()} />"#);
+    // Dynamic property should be wrapped in effect
+    assert!(code.contains("effect"));
+    assert!(code.contains(".value = value()"));
+}
+
+#[test]
+fn test_dom_prop_boolean() {
+    let code = transform_dom(r#"<input prop:disabled />"#);
+    // Boolean prop should set to true
+    assert!(code.contains(".disabled = true"));
+}
+
+#[test]
+fn test_dom_prop_current_time() {
+    // Common use case: video currentTime
+    let code = transform_dom(r#"<video prop:currentTime={time()}></video>"#);
+    assert!(code.contains("effect"));
+    assert!(code.contains(".currentTime = time()"));
+}
+
+// ============================================================================
 // DOM: Style
 // ============================================================================
 

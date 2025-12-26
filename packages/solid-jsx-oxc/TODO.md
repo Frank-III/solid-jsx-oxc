@@ -2,34 +2,25 @@
 
 This document tracks features that are not yet implemented or incomplete in the OXC-based Solid JSX transformer.
 
-## Recently Fixed (Critical SSR Issues)
+## Recently Fixed
 
-The following critical SSR issues have been fixed:
+The following issues have been fixed:
 
 - ~~SSR Expression Container~~ - Now properly extracts and uses expressions
 - ~~SSR Spread Children~~ - Now extracts spread expressions
 - ~~SSR Fragment Children~~ - Now recursively processes fragment children
 - ~~SSR Element with Spread~~ - Now builds proper props object and children expression
+- ~~Property Bindings (`prop:`)~~ - Now transforms to direct property assignments
 
 ## High Priority
 
 ### 1. Directive Handling (`use:`)
 **Status**: Partial - works in DOM, skipped in SSR
 
-- **DOM**: `crates/dom/src/element.rs:320-344` - wrapped in generic `use()` call
+- **DOM**: `crates/dom/src/element.rs:324-349` - wrapped in generic `use()` call
 - **SSR**: `crates/ssr/src/element.rs:128` - skipped entirely (directives are client-only)
 
-### 2. Property Bindings (`prop:`)
-**Status**: Recognized but skipped
-
-The `prop:` prefix is detected but not transformed into property assignments.
-This is used to set DOM properties directly instead of attributes:
-```jsx
-<input prop:value={val} />  // Sets element.value = val
-<video prop:currentTime={time} />
-```
-
-### 3. SuspenseList Component
+### 2. SuspenseList Component
 **Status**: Declared but not implemented
 
 Listed in `BUILT_INS` but no specific transform function. Falls through to generic component handling.
@@ -79,7 +70,7 @@ These differ from the Babel implementation by design:
 
 3. **Complex Expression Parsing**: Expressions are parsed as strings which may lose some AST information
 
-## Test Coverage
+## Test Coverage (56 tests passing)
 
 Features verified working:
 - [x] Basic element transformation
@@ -101,6 +92,7 @@ Features verified working:
 - [x] SSR spread children
 - [x] SSR fragment children
 - [x] SSR element with spread props
+- [x] Property bindings (`prop:`)
 
 Features needing more testing:
 - [ ] classList with object binding
