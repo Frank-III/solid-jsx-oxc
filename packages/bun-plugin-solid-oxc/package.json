@@ -1,0 +1,44 @@
+{
+  "name": "bun-plugin-solid-oxc",
+  "version": "0.1.0",
+  "description": "Bun plugin for SolidJS using OXC-based compiler",
+  "main": "src/index.ts",
+  "module": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "require": "./src/index.ts",
+      "types": "./src/index.ts"
+    },
+    "./register": {
+      "import": "./register.ts",
+      "require": "./register.ts"
+    }
+  },
+  "files": [
+    "src",
+    "register.ts"
+  ],
+  "scripts": {
+    "typecheck": "bun x tsc --noEmit"
+  },
+  "keywords": [
+    "bun",
+    "bun-plugin",
+    "solid",
+    "solidjs",
+    "jsx",
+    "oxc"
+  ],
+  "author": "SolidJS Contributors",
+  "license": "MIT",
+  "peerDependencies": {
+    "solid-jsx-oxc": "*"
+  },
+  "devDependencies": {
+    "solid-jsx-oxc": "*",
+    "@types/bun": "latest",
+    "typescript": "^5.0.0"
+  }
+}
