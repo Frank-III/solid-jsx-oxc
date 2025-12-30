@@ -68,8 +68,15 @@ pub fn escape_html(text: &str, quote_escape: bool) -> String {
     result
 }
 
-/// Trim whitespace from JSX text (preserving some spaces)
+/// Trim whitespace from JSX text (preserving significant spaces)
+///
+/// JSX whitespace rules:
+/// - Text with newlines: trim leading/trailing whitespace (indentation)
+/// - Inline text (no newlines): preserve trailing space (e.g., ". " between expressions)
+/// - Multiple whitespace collapses to single space
 pub fn trim_whitespace(text: &str) -> String {
+    let has_newline = text.contains('\n');
+
     // Collapse multiple whitespace into single space
     let mut result = String::new();
     let mut prev_was_space = false;
@@ -86,7 +93,13 @@ pub fn trim_whitespace(text: &str) -> String {
         }
     }
 
-    result.trim().to_string()
+    // Only trim if text contained newlines (multi-line JSX text with indentation)
+    // Preserve trailing space for inline text like ". " between expressions
+    if has_newline {
+        result.trim().to_string()
+    } else {
+        result
+    }
 }
 
 /// Convert event name from JSX format (onClick or on:click) to DOM format (click)

@@ -1,0 +1,6 @@
+[submodule "benchmark/opentui"]
+	path = benchmark/opentui
+	url = https://github.com/sst/opentui.git
+[submodule "benchmark/solid-primitives"]
+	path = benchmark/solid-primitives
+	url = https://github.com/solidjs-community/solid-primitives.git

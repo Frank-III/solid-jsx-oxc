@@ -72,12 +72,16 @@ pub fn transform_element<'a, 'b>(
     // Transform children (if not void element)
     if !is_void {
         // Pass down the root ID and path for children
+        // If this element has an ID, it becomes the new root for children
+        // and children's paths reset to be relative to this element
         let child_info = TransformInfo {
-            root_id: if info.top_level {
-                result.id.clone()
+            root_id: result.id.clone().or_else(|| info.root_id.clone()),
+            path: if result.id.is_some() {
+                vec![]
             } else {
-                info.root_id.clone()
+                info.path.clone()
             },
+            top_level: false,
             ..info.clone()
         };
         transform_children(
@@ -698,6 +702,42 @@ fn transform_children<'a, 'b>(
         access
     }
 
+    /// Check if children list is a single dynamic expression (no markers needed)
+    fn is_single_dynamic_child(children: &[oxc_ast::ast::JSXChild<'_>]) -> bool {
+        let mut expr_count = 0;
+        let mut other_content = false;
+
+        for child in children {
+            match child {
+                oxc_ast::ast::JSXChild::Text(text) => {
+                    let content = common::expression::trim_whitespace(&text.value);
+                    if !content.is_empty() {
+                        other_content = true;
+                    }
+                }
+                oxc_ast::ast::JSXChild::Element(_) => {
+                    other_content = true;
+                }
+                oxc_ast::ast::JSXChild::ExpressionContainer(container) => {
+                    if container.expression.as_expression().is_some() {
+                        expr_count += 1;
+                    }
+                }
+                oxc_ast::ast::JSXChild::Fragment(fragment) => {
+                    // Recurse into fragments
+                    if !is_single_dynamic_child(&fragment.children) {
+                        other_content = true;
+                    } else {
+                        expr_count += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        expr_count == 1 && !other_content
+    }
+
     fn transform_children_list<'a, 'b>(
         children: &[oxc_ast::ast::JSXChild<'a>],
         result: &mut TransformResult,
@@ -707,6 +747,7 @@ fn transform_children<'a, 'b>(
         transform_child: ChildTransformer<'a, 'b>,
         node_index: &mut usize,
         last_was_text: &mut bool,
+        single_dynamic: bool,
     ) {
         for child in children {
             match child {
@@ -736,23 +777,33 @@ fn transform_children<'a, 'b>(
 
                             context.register_helper("insert");
 
-                            result.template.push_str("<!>");
-                            result.template_with_closing_tags.push_str("<!>");
+                            // Single dynamic child: no marker needed
+                            if single_dynamic {
+                                result.exprs.push(Expr {
+                                    code: format!(
+                                        "insert({}, {})",
+                                        parent_id, child_result.exprs[0].code
+                                    ),
+                                });
+                            } else {
+                                result.template.push_str("<!>");
+                                result.template_with_closing_tags.push_str("<!>");
 
-                            let marker_id = context.generate_uid("el$");
-                            result.declarations.push(Declaration {
-                                name: marker_id.clone(),
-                                init: child_accessor(parent_id, *node_index),
-                            });
+                                let marker_id = context.generate_uid("el$");
+                                result.declarations.push(Declaration {
+                                    name: marker_id.clone(),
+                                    init: child_accessor(parent_id, *node_index),
+                                });
 
-                            result.exprs.push(Expr {
-                                code: format!(
-                                    "insert({}, {}, {})",
-                                    parent_id, child_result.exprs[0].code, marker_id
-                                ),
-                            });
+                                result.exprs.push(Expr {
+                                    code: format!(
+                                        "insert({}, {}, {})",
+                                        parent_id, child_result.exprs[0].code, marker_id
+                                    ),
+                                });
 
-                            *node_index += 1;
+                                *node_index += 1;
+                            }
                         }
                         continue;
                     }
@@ -798,15 +849,6 @@ fn transform_children<'a, 'b>(
                         *last_was_text = false;
                         context.register_helper("insert");
 
-                        result.template.push_str("<!>");
-                        result.template_with_closing_tags.push_str("<!>");
-
-                        let marker_id = context.generate_uid("el$");
-                        result.declarations.push(Declaration {
-                            name: marker_id.clone(),
-                            init: child_accessor(parent_id, *node_index),
-                        });
-
                         let expr_str = expr_to_string(expr);
                         let insert_value = if is_dynamic(expr) {
                             format!("() => {}", expr_str)
@@ -814,11 +856,30 @@ fn transform_children<'a, 'b>(
                             expr_str
                         };
 
-                        result.exprs.push(Expr {
-                            code: format!("insert({}, {}, {})", parent_id, insert_value, marker_id),
-                        });
+                        // Single dynamic child: no marker needed
+                        if single_dynamic {
+                            result.exprs.push(Expr {
+                                code: format!("insert({}, {})", parent_id, insert_value),
+                            });
+                        } else {
+                            result.template.push_str("<!>");
+                            result.template_with_closing_tags.push_str("<!>");
 
-                        *node_index += 1;
+                            let marker_id = context.generate_uid("el$");
+                            result.declarations.push(Declaration {
+                                name: marker_id.clone(),
+                                init: child_accessor(parent_id, *node_index),
+                            });
+
+                            result.exprs.push(Expr {
+                                code: format!(
+                                    "insert({}, {}, {})",
+                                    parent_id, insert_value, marker_id
+                                ),
+                            });
+
+                            *node_index += 1;
+                        }
                     }
                 }
                 oxc_ast::ast::JSXChild::Fragment(fragment) => {
@@ -831,6 +892,7 @@ fn transform_children<'a, 'b>(
                         transform_child,
                         node_index,
                         last_was_text,
+                        single_dynamic,
                     );
                 }
                 _ => {}
@@ -840,6 +902,7 @@ fn transform_children<'a, 'b>(
 
     let mut node_index = 0usize;
     let mut last_was_text = false;
+    let single_dynamic = is_single_dynamic_child(&element.children);
     transform_children_list(
         &element.children,
         result,
@@ -849,5 +912,6 @@ fn transform_children<'a, 'b>(
         transform_child,
         &mut node_index,
         &mut last_was_text,
+        single_dynamic,
     );
 }

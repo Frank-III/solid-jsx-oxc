@@ -149,8 +149,9 @@ fn test_dom_mixed_children() {
 #[test]
 fn test_dom_mixed_text_inserts_before_marker() {
     let code = transform_dom(r#"<div>Hello {name()}!</div>"#);
-    assert!(code.contains("<div>Hello<!>!</div>"));
-    assert!(code.contains("insert(_el$1, () => name(), _el$2)"));
+    // Whitespace is preserved: "Hello " keeps trailing space
+    assert!(code.contains("<div>Hello <!>!</div>"), "Template should preserve space before marker, got: {}", code);
+    assert!(code.contains("insert(_el$1, () => name(), _el$2)"), "Should insert with marker, got: {}", code);
 }
 
 #[test]
@@ -615,4 +616,36 @@ fn test_ssr_imports() {
     assert!(code.contains("import"));
     assert!(code.contains("ssr"));
     assert!(code.contains("escape"));
+}
+
+// ============================================================================
+// Regression Tests for Nested Dynamic Content
+// ============================================================================
+
+#[test]
+fn test_dom_nested_dynamic_content() {
+    // {x()} inside nested <span> should produce insert() without marker (single dynamic child)
+    let code = transform_dom(r#"<div><span>{x()}</span></div>"#);
+
+    // Template should have span without marker (single dynamic child optimization)
+    assert!(code.contains("<span></span>"), "Template should have empty span (no marker for single dynamic child), got: {}", code);
+
+    // Should walk to span element
+    assert!(code.contains("firstChild"), "Should walk to span with firstChild, got: {}", code);
+
+    // Should insert into span without marker argument
+    assert!(code.contains("insert("), "Should have insert() call, got: {}", code);
+    assert!(code.contains("x()"), "Should reference x(), got: {}", code);
+}
+
+#[test]
+fn test_dom_two_siblings_with_events() {
+    // Bug: second button should use firstChild.nextSibling not root.nextSibling
+    let code = transform_dom(r#"<div><button onClick={() => 1}>A</button><button onClick={() => 2}>B</button></div>"#);
+
+    // Should have proper sibling traversal
+    assert!(code.contains("firstChild"), "Should walk to first button, got: {}", code);
+    // Second button should chain from first: firstChild.nextSibling
+    assert!(code.contains("firstChild.nextSibling"),
+        "Should walk to second button via firstChild.nextSibling, got: {}", code);
 }
