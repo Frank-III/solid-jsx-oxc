@@ -18,8 +18,8 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.dependencies]
-napi = { version = "3.3.0", features = ["napi9"] }
-napi-derive = "3.3.0"
+napi = { version = "3.8.2", features = ["napi9"] }
+napi-derive = "3.5.1"
 
 oxc_parser = "0.105.0"
 oxc_ast = "0.105.0"
@@ -57,7 +57,7 @@ ssr = { workspace = true }
 insta = "1.43.2"
 
 [build-dependencies]
-napi-build = "2"
+napi-build = "2.3.1"
 
 [profile.release]
 lto = true
