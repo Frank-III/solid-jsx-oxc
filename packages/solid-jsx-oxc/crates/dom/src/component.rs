@@ -9,6 +9,84 @@ use common::{
 
 use crate::ir::{BlockContext, ChildTransformer, Expr, TransformResult};
 
+fn build_child_output(result: &TransformResult, context: &BlockContext) -> Option<String> {
+    // Handle fragment with mixed children (array output)
+    if !result.child_codes.is_empty() {
+        return Some(format!("[{}]", result.child_codes.join(", ")));
+    }
+
+    // Handle text-only result - just return the string literal
+    if result.text && !result.template.is_empty() {
+        return Some(format!("\"{}\"", result.template));
+    }
+
+    // If there's a template, we need to clone it
+    if !result.template.is_empty() && !result.skip_template {
+        // Push template and get variable name
+        let tmpl_idx = context.push_template(result.template.clone(), result.is_svg);
+        let tmpl_var = format!("_tmpl${}", tmpl_idx + 1);
+
+        // Use the generated element ID when available (matches expression wiring).
+        // Fall back to a local _el$ when the element didn't require a stable ID.
+        let elem_var = result.id.clone().unwrap_or_else(|| "_el$".to_string());
+
+        let mut code = String::new();
+        code.push_str("(() => { ");
+        code.push_str(&format!("const {} = {}.cloneNode(true); ", elem_var, tmpl_var));
+
+        // Add declarations (element walking for nested elements)
+        for decl in &result.declarations {
+            code.push_str(&format!("const {} = {}; ", decl.name, decl.init));
+        }
+
+        // Add expressions (effects, inserts, etc.)
+        for expr in &result.exprs {
+            code.push_str(&format!("{}; ", expr.code));
+        }
+
+        // Add dynamic bindings
+        for binding in &result.dynamics {
+            context.register_helper("effect");
+            if binding.key == "style" {
+                context.register_helper("style");
+            } else if binding.key == "classList" {
+                context.register_helper("classList");
+            } else {
+                context.register_helper("setAttribute");
+            }
+            let setter = crate::template::generate_set_attr(binding);
+            code.push_str(&format!("effect(() => {}); ", setter));
+        }
+
+        // Add post expressions
+        for expr in &result.post_exprs {
+            code.push_str(&format!("{}; ", expr.code));
+        }
+
+        code.push_str(&format!("return {}; }})()", elem_var));
+        return Some(code);
+    }
+
+    // Just expressions (like a component call or fragment expression)
+    if !result.exprs.is_empty() {
+        let expr_code = result
+            .exprs
+            .iter()
+            .map(|e| e.code.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        if result.needs_memo {
+            context.register_helper("memo");
+            return Some(format!("memo({})", expr_code));
+        }
+
+        return Some(expr_code);
+    }
+
+    None
+}
+
 /// Transform a component element
 pub fn transform_component<'a, 'b>(
     element: &JSXElement<'a>,
@@ -278,6 +356,26 @@ fn build_props<'a, 'b>(
     _options: &TransformOptions<'a>,
     transform_child: ChildTransformer<'a, 'b>,
 ) -> String {
+    fn is_valid_prop_identifier(key: &str) -> bool {
+        let mut chars = key.chars();
+        match chars.next() {
+            Some(c) if c == '$' || c == '_' || c.is_ascii_alphabetic() => {}
+            _ => return false,
+        }
+
+        chars.all(|c| c == '$' || c == '_' || c.is_ascii_alphanumeric())
+    }
+
+    fn format_prop_key(key: &str) -> String {
+        if is_valid_prop_identifier(key) {
+            return key.to_string();
+        }
+
+        // Quote invalid identifiers (aria-label, data-*, on:click, etc.)
+        let escaped = key.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{}\"", escaped)
+    }
+
     let mut static_props: Vec<String> = vec![];
     let mut dynamic_props: Vec<String> = vec![];
     let mut spreads: Vec<String> = vec![];
@@ -285,20 +383,21 @@ fn build_props<'a, 'b>(
     for attr in &element.opening_element.attributes {
         match attr {
             JSXAttributeItem::Attribute(attr) => {
-                let key = match &attr.name {
+                let raw_key = match &attr.name {
                     JSXAttributeName::Identifier(id) => id.name.to_string(),
                     JSXAttributeName::NamespacedName(ns) => {
                         format!("{}:{}", ns.namespace.name, ns.name.name)
                     }
                 };
+                let key = format_prop_key(&raw_key);
 
                 // Skip component and children props for Dynamic
-                if key == "component" || key == "children" {
+                if raw_key == "component" || raw_key == "children" {
                     continue;
                 }
 
                 // Handle ref prop specially - needs ref forwarding
-                if key == "ref" {
+                if raw_key == "ref" {
                     if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
                         if let Some(expr) = container.expression.as_expression() {
                             let expr_str = expr_to_string(expr);
@@ -398,24 +497,7 @@ fn get_children_expr_transformed<'a, 'b>(
             JSXChild::Element(_) | JSXChild::Fragment(_) => {
                 // Transform the child JSX element/fragment
                 if let Some(result) = transform_child(child) {
-                    // Get the generated code from the result
-                    if !result.exprs.is_empty() {
-                        children.push(result.exprs[0].code.clone());
-                    } else if !result.template.is_empty() {
-                        // This is a native element - output the IIFE that creates it
-                        let tmpl_idx =
-                            context.push_template(result.template.clone(), result.is_svg);
-                        let tmpl_var = format!("_tmpl${}", tmpl_idx + 1);
-                        let elem_var = context.generate_uid("el$");
-
-                        let mut code = format!(
-                            "(() => {{ const {} = {}.cloneNode(true);",
-                            elem_var, tmpl_var
-                        );
-                        for expr in &result.exprs {
-                            code.push_str(&format!(" {};", expr.code));
-                        }
-                        code.push_str(&format!(" return {}; }})()", elem_var));
+                    if let Some(code) = build_child_output(&result, context) {
                         children.push(code);
                     }
                 }

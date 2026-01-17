@@ -440,6 +440,10 @@ fn test_dom_show() {
     assert!(code.contains("Show"));
     assert!(code.contains("when:"));
     assert!(code.contains("visible"));
+    assert!(
+        code.contains("cloneNode(true)"),
+        "Show children should be transformed JSX output"
+    );
 }
 
 #[test]
@@ -449,6 +453,24 @@ fn test_dom_show_with_fallback() {
     );
     assert!(code.contains("Show"));
     assert!(code.contains("fallback:"));
+    assert!(
+        code.contains("cloneNode(true)"),
+        "Show fallback/children JSX should be transformed"
+    );
+}
+
+#[test]
+fn test_dom_show_with_event_child() {
+    let code = transform_dom(r#"<Show when={visible}><button onClick={handler}>ok</button></Show>"#);
+    assert!(code.contains("Show"));
+    assert!(
+        code.contains("$$click"),
+        "Event handler should compile to delegated $$click assignment"
+    );
+    assert!(
+        code.contains("return _el$"),
+        "Show child should return the created element (not just a side effect)"
+    );
 }
 
 #[test]
@@ -616,6 +638,29 @@ fn test_ssr_imports() {
     assert!(code.contains("import"));
     assert!(code.contains("ssr"));
     assert!(code.contains("escape"));
+}
+
+#[test]
+fn test_dom_source_map_generation() {
+    let options = TransformOptions {
+        filename: "input.jsx",
+        source_map: true,
+        ..TransformOptions::solid_defaults()
+    };
+    let result = transform(r#"<div>{x()}</div>"#, Some(options));
+    assert!(result.map.is_some(), "expected source map to be generated");
+}
+
+#[test]
+fn test_ssr_source_map_generation() {
+    let options = TransformOptions {
+        generate: GenerateMode::Ssr,
+        filename: "input.jsx",
+        source_map: true,
+        ..TransformOptions::solid_defaults()
+    };
+    let result = transform(r#"<div>{x()}</div>"#, Some(options));
+    assert!(result.map.is_some(), "expected source map to be generated");
 }
 
 // ============================================================================

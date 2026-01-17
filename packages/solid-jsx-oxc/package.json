@@ -1,19 +1,18 @@
 {
   "name": "solid-jsx-oxc",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.8",
   "description": "OXC-based JSX compiler for SolidJS",
+  "type": "module",
   "main": "index.js",
   "types": "index.d.ts",
   "exports": {
     ".": {
       "types": "./index.d.ts",
-      "require": "./index.js",
-      "import": "./index.mjs"
+      "import": "./index.js"
     }
   },
   "files": [
     "index.js",
-    "index.mjs",
     "index.d.ts",
     "binding.d.ts",
     "*.node"

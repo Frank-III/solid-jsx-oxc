@@ -241,6 +241,25 @@ fn build_props<'a, 'b>(
     _options: &TransformOptions<'a>,
     transform_child: SSRChildTransformer<'a, 'b>,
 ) -> String {
+    fn is_valid_prop_identifier(key: &str) -> bool {
+        let mut chars = key.chars();
+        match chars.next() {
+            Some(c) if c == '$' || c == '_' || c.is_ascii_alphabetic() => {}
+            _ => return false,
+        }
+
+        chars.all(|c| c == '$' || c == '_' || c.is_ascii_alphanumeric())
+    }
+
+    fn format_prop_key(key: &str) -> String {
+        if is_valid_prop_identifier(key) {
+            return key.to_string();
+        }
+
+        let escaped = key.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{}\"", escaped)
+    }
+
     let mut static_props: Vec<String> = vec![];
     let mut dynamic_props: Vec<String> = vec![];
     let mut spreads: Vec<String> = vec![];
@@ -248,15 +267,16 @@ fn build_props<'a, 'b>(
     for attr in &element.opening_element.attributes {
         match attr {
             JSXAttributeItem::Attribute(attr) => {
-                let key = match &attr.name {
+                let raw_key = match &attr.name {
                     JSXAttributeName::Identifier(id) => id.name.to_string(),
                     JSXAttributeName::NamespacedName(ns) => {
                         format!("{}:{}", ns.namespace.name, ns.name.name)
                     }
                 };
+                let key = format_prop_key(&raw_key);
 
                 // Skip event handlers and refs in SSR
-                if key.starts_with("on") || key == "ref" || key.starts_with("use:") {
+                if raw_key.starts_with("on") || raw_key == "ref" || raw_key.starts_with("use:") {
                     continue;
                 }
 

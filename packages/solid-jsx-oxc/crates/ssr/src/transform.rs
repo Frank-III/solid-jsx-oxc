@@ -8,9 +8,10 @@ use oxc_ast::ast::{
     JSXExpressionContainer, JSXFragment, JSXText, ModuleExportName, Program, Statement,
     TemplateElementValue,
 };
+use oxc_ast_visit::VisitMut;
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
-use oxc_span::{SourceType, Span};
+use oxc_span::{SourceType, Span, SPAN};
 use oxc_traverse::{traverse_mut, Traverse, TraverseCtx};
 
 use common::{get_tag_name, is_component, TransformOptions};
@@ -18,6 +19,16 @@ use common::{get_tag_name, is_component, TransformOptions};
 use crate::component::transform_component;
 use crate::element::transform_element;
 use crate::ir::{SSRContext, SSRResult};
+
+struct SpanResetVisitor {
+    span: Span,
+}
+
+impl<'a> VisitMut<'a> for SpanResetVisitor {
+    fn visit_span(&mut self, it: &mut Span) {
+        *it = self.span;
+    }
+}
 
 /// The main SSR JSX transformer
 pub struct SSRTransform<'a> {
@@ -170,7 +181,7 @@ impl<'a> Traverse<'a, ()> for SSRTransform<'a> {
         // NOTE: This import building logic is duplicated with DOM transform.
         // Extraction is non-trivial due to OXC's lifetime requirements.
         let ast = ctx.ast;
-        let span = Span::default();
+        let span = SPAN;
         let module_name = self.options.module_name;
 
         // Build specifiers
@@ -214,7 +225,7 @@ impl<'a> SSRTransform<'a> {
         ctx: &mut TraverseCtx<'a, ()>,
     ) -> Expression<'a> {
         let ast = ctx.ast;
-        let span = Span::default();
+        let span = SPAN;
 
         // If no dynamic values, just return a string literal
         if result.template_values.is_empty() {
@@ -271,7 +282,7 @@ impl<'a> SSRTransform<'a> {
         ctx: &mut TraverseCtx<'a, ()>,
     ) -> Expression<'a> {
         let _ast = ctx.ast;
-        let _span = Span::default();
+        let _span = SPAN;
 
         // Try to parse the expression
         let parsed_expr = self.parse_expression(expr_str, ctx);
@@ -291,7 +302,7 @@ impl<'a> SSRTransform<'a> {
     /// Parse an expression string into an AST Expression
     fn parse_expression(&self, expr_str: &str, ctx: &mut TraverseCtx<'a, ()>) -> Expression<'a> {
         let ast = ctx.ast;
-        let span = Span::default();
+        let span = SPAN;
 
         // Use the arena allocator to parse the expression
         let allocator = ast.allocator;
@@ -305,7 +316,9 @@ impl<'a> SSRTransform<'a> {
             if let Statement::ExpressionStatement(expr_stmt) = stmt {
                 // Clone the expression into our allocator
                 // Note: This is a simplified approach - ideally we'd transfer ownership
-                return expr_stmt.expression.clone_in(allocator);
+                let mut expr = expr_stmt.expression.clone_in(allocator);
+                SpanResetVisitor { span: SPAN }.visit_expression(&mut expr);
+                return expr;
             }
         }
 
@@ -323,7 +336,7 @@ impl<'a> SSRTransform<'a> {
         ctx: &mut TraverseCtx<'a, ()>,
     ) -> Expression<'a> {
         let ast = ctx.ast;
-        let span = Span::default();
+        let span = SPAN;
 
         // Create: escape(expr) or escape(expr, true)
         let callee = ast.expression_identifier(span, "escape");

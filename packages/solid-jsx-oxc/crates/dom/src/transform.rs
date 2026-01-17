@@ -6,9 +6,10 @@ use oxc_ast::ast::{
     Expression, ImportDeclarationSpecifier, ImportOrExportKind, JSXChild, JSXElement,
     JSXExpressionContainer, JSXFragment, JSXText, ModuleExportName, Program, Statement,
 };
+use oxc_ast_visit::VisitMut;
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
-use oxc_span::{SourceType, Span};
+use oxc_span::{SourceType, Span, SPAN};
 use oxc_traverse::{traverse_mut, Traverse, TraverseCtx};
 
 use common::{expr_to_string, get_tag_name, is_component, TransformOptions};
@@ -16,6 +17,16 @@ use common::{expr_to_string, get_tag_name, is_component, TransformOptions};
 use crate::component::transform_component;
 use crate::element::transform_element;
 use crate::ir::{BlockContext, TransformResult};
+
+struct SpanResetVisitor {
+    span: Span,
+}
+
+impl<'a> VisitMut<'a> for SpanResetVisitor {
+    fn visit_span(&mut self, it: &mut Span) {
+        *it = self.span;
+    }
+}
 
 /// The main Solid JSX transformer
 pub struct SolidTransform<'a> {
@@ -347,6 +358,7 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
     fn exit_expression(&mut self, node: &mut Expression<'a>, ctx: &mut TraverseCtx<'a, ()>) {
         let new_expr = match node {
             Expression::JSXElement(element) => {
+                let source_span = element.span;
                 let result = self.transform_jsx_element(
                     element,
                     &TransformInfo {
@@ -355,9 +367,10 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
                         ..Default::default()
                     },
                 );
-                Some(self.build_dom_expression(&result, ctx))
+                Some(self.build_dom_expression(&result, source_span, ctx))
             }
             Expression::JSXFragment(fragment) => {
+                let source_span = fragment.span;
                 let result = self.transform_fragment(
                     fragment,
                     &TransformInfo {
@@ -365,7 +378,7 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
                         ..Default::default()
                     },
                 );
-                Some(self.build_dom_expression(&result, ctx))
+                Some(self.build_dom_expression(&result, source_span, ctx))
             }
             _ => None,
         };
@@ -385,7 +398,7 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
         }
 
         let ast = ctx.ast;
-        let span = Span::default();
+        let span = SPAN;
 
         // Insert template declarations
         // const _tmpl$ = template(`<div></div>`);
@@ -466,10 +479,11 @@ impl<'a> SolidTransform<'a> {
     fn build_dom_expression(
         &self,
         result: &TransformResult,
+        source_span: Span,
         ctx: &mut TraverseCtx<'a, ()>,
     ) -> Expression<'a> {
         let ast = ctx.ast;
-        let span = Span::default();
+        let span = SPAN;
 
         // Handle text-only result directly as a string literal
         if result.text && !result.template.is_empty() && result.child_codes.is_empty() {
@@ -488,7 +502,9 @@ impl<'a> SolidTransform<'a> {
         // Try to extract the expression from the parsed program
         if let Some(stmt) = parse_result.program.body.first() {
             if let Statement::ExpressionStatement(expr_stmt) = stmt {
-                return expr_stmt.expression.clone_in(allocator);
+                let mut expr = expr_stmt.expression.clone_in(allocator);
+                SpanResetVisitor { span: source_span }.visit_expression(&mut expr);
+                return expr;
             }
         }
 
@@ -508,6 +524,10 @@ impl<'a> SolidTransform<'a> {
             .program
             .body
             .first()
-            .map(|stmt| stmt.clone_in(allocator))
+            .map(|stmt| {
+                let mut stmt = stmt.clone_in(allocator);
+                SpanResetVisitor { span: SPAN }.visit_statement(&mut stmt);
+                stmt
+            })
     }
 }

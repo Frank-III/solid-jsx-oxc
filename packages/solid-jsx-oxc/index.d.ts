@@ -74,17 +74,16 @@ export function transform(source: string, options?: TransformOptions): Transform
 
 /**
  * Low-level transform function from the native binding.
- * Prefers snake_case option names.
  */
 export function transformJsx(source: string, options?: {
-  module_name?: string;
-  generate?: string;
+  moduleName?: string;
+  generate?: 'dom' | 'ssr' | 'universal' | string;
   hydratable?: boolean;
-  delegate_events?: boolean;
-  wrap_conditionals?: boolean;
-  context_to_custom_elements?: boolean;
+  delegateEvents?: boolean;
+  wrapConditionals?: boolean;
+  contextToCustomElements?: boolean;
   filename?: string;
-  source_map?: boolean;
+  sourceMap?: boolean;
 } | null): TransformResult;
 
 export interface PresetResult {

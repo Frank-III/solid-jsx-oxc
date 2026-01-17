@@ -148,16 +148,16 @@ export default function solidOxc(options: SolidOxcOptions = {}): Plugin {
         const generate = opts.ssr ? 'ssr' : opts.generate;
 
         try {
-           const result = solidJsxOxc.transformJsx(code, {
-             filename: fileId,
-             module_name: opts.module_name,
-             generate,
-             hydratable: opts.hydratable,
-             delegate_events: opts.delegate_events,
-             wrap_conditionals: opts.wrap_conditionals,
-             context_to_custom_elements: opts.context_to_custom_elements,
-             source_map: true,
-           });
+          const result = solidJsxOxc.transformJsx(code, {
+            filename: fileId,
+            moduleName: opts.module_name,
+            generate,
+            hydratable: opts.hydratable,
+            delegateEvents: opts.delegate_events,
+            wrapConditionals: opts.wrap_conditionals,
+            contextToCustomElements: opts.context_to_custom_elements,
+            sourceMap: true,
+          });
 
           let finalCode = result.code;
 

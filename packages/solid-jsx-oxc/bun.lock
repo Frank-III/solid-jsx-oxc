@@ -5,7 +5,7 @@
     "": {
       "name": "solid-jsx-oxc",
       "devDependencies": {
-        "@napi-rs/cli": "^3.0.0-alpha.69",
+        "@napi-rs/cli": "^3.5.0",
       },
     },
   },

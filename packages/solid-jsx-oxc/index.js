@@ -1,16 +1,16 @@
 /**
  * solid-jsx-oxc - OXC-based JSX compiler for SolidJS
  *
- * This is the JavaScript wrapper around the Rust NAPI bindings.
- * It provides the same interface as babel-preset-solid.
+ * ESM entry point - provides the same interface as babel-preset-solid.
  */
 
-// Try to load the native module
-let nativeBinding = null;
+import { createRequire } from 'node:module';
+import { platform, arch } from 'node:process';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 
-// Detect platform and architecture
-const platform = process.platform;
-const arch = process.arch;
+const require = createRequire(import.meta.url);
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Map Node.js platform/arch to binary file suffix
 const platformMap = {
@@ -25,24 +25,27 @@ const platformMap = {
 const platformKey = `${platform}-${arch}`;
 const nativeTarget = platformMap[platformKey];
 
+// Try to load the native module
+let nativeBinding = null;
+
 try {
   if (nativeTarget) {
     // Try platform-specific binary first
-    nativeBinding = require(`./solid-jsx-oxc.${nativeTarget}.node`);
+    nativeBinding = require(join(__dirname, `solid-jsx-oxc.${nativeTarget}.node`));
   } else {
     // Fallback to generic name
-    nativeBinding = require('./solid-jsx-oxc.node');
+    nativeBinding = require(join(__dirname, 'solid-jsx-oxc.node'));
   }
 } catch (e) {
   // Fallback message if native module not found
   console.warn(`solid-jsx-oxc: Native module not found for ${platformKey}. Run \`npm run build\` to compile.`);
-  console.warn(e.message);
+  console.warn(e instanceof Error ? e.message : String(e));
 }
 
 /**
  * Default options matching babel-preset-solid
  */
-const defaultOptions = {
+export const defaultOptions = {
   moduleName: 'solid-js/web',
   builtIns: [
     'For',
@@ -70,7 +73,7 @@ const defaultOptions = {
  * @param {object} options - Transform options
  * @returns {{ code: string, map?: string }}
  */
-function transform(source, options = {}) {
+export function transform(source, options = {}) {
   if (!nativeBinding) {
     throw new Error('solid-jsx-oxc: Native module not loaded. Ensure it is built for your platform.');
   }
@@ -88,7 +91,7 @@ function transform(source, options = {}) {
  * @param {object} options - User options
  * @returns {object}
  */
-function preset(context, options = {}) {
+export function preset(context, options = {}) {
   const mergedOptions = { ...defaultOptions, ...options };
 
   return {
@@ -100,13 +103,15 @@ function preset(context, options = {}) {
   };
 }
 
-module.exports = {
+/**
+ * Low-level transform function from the native binding
+ */
+export const transformJsx = nativeBinding ? nativeBinding.transformJsx : null;
+
+// Default export for convenience
+export default {
   transform,
   preset,
   defaultOptions,
-  // Also export the raw binding for advanced usage
-  transformJsx: nativeBinding ? nativeBinding.transformJsx : null,
+  transformJsx,
 };
-
-// Also export as default for ESM compatibility
-module.exports.default = module.exports;
