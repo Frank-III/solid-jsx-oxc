@@ -1,77 +1,177 @@
 //! SSR component transform
 //!
-//! Components in SSR are rendered the same way as DOM - using createComponent.
-//! The component itself decides whether to render for server or client.
+//! Components in SSR are rendered using `createComponent`. Like DOM mode, we build a props object
+//! where dynamic values are exposed as getters so they're evaluated inside reactive contexts.
 
-use oxc_ast::ast::{JSXAttributeItem, JSXAttributeName, JSXAttributeValue, JSXChild, JSXElement};
-
-use common::{
-    expr_to_string, find_prop_value, get_children_callback, is_built_in, is_dynamic,
-    TransformOptions,
+use oxc_ast::ast::{
+    Argument, ArrayExpressionElement, Expression, FormalParameterKind, FunctionType,
+    JSXAttributeItem, JSXAttributeName, JSXAttributeValue, JSXChild, JSXElement, JSXElementName,
+    JSXMemberExpression, JSXMemberExpressionObject, ObjectPropertyKind, PropertyKey, PropertyKind,
+    Statement,
 };
+use oxc_ast::AstBuilder;
+use oxc_ast::NONE;
+use oxc_span::SPAN;
+
+use common::{is_dynamic, TransformOptions};
 
 use crate::ir::{SSRChildTransformer, SSRContext, SSRResult};
 
-// find_prop_value and get_children_callback moved to common module
+fn jsx_member_expression_to_expression<'a>(
+    ast: AstBuilder<'a>,
+    member: &JSXMemberExpression<'a>,
+) -> Expression<'a> {
+    let object = match &member.object {
+        JSXMemberExpressionObject::IdentifierReference(id) => {
+            ast.expression_identifier(id.span, id.name)
+        }
+        JSXMemberExpressionObject::MemberExpression(inner) => {
+            jsx_member_expression_to_expression(ast, inner)
+        }
+        JSXMemberExpressionObject::ThisExpression(expr) => ast.expression_this(expr.span),
+    };
+
+    let property = ast.identifier_name(member.property.span, member.property.name);
+    Expression::StaticMemberExpression(ast.alloc_static_member_expression(
+        member.span,
+        object,
+        property,
+        false,
+    ))
+}
+
+fn jsx_element_name_to_expression<'a>(
+    ast: AstBuilder<'a>,
+    name: &JSXElementName<'a>,
+) -> Expression<'a> {
+    match name {
+        JSXElementName::Identifier(id) => ast.expression_identifier(id.span, id.name),
+        JSXElementName::IdentifierReference(id) => ast.expression_identifier(id.span, id.name),
+        JSXElementName::MemberExpression(member) => {
+            jsx_member_expression_to_expression(ast, member)
+        }
+        JSXElementName::ThisExpression(expr) => ast.expression_this(expr.span),
+        JSXElementName::NamespacedName(ns) => {
+            // Namespaced tag names are not valid component references in JS.
+            // This should never happen for components.
+            let _ = ns;
+            ast.expression_identifier(SPAN, "undefined")
+        }
+    }
+}
+
+fn getter_return_expr<'a>(
+    ast: AstBuilder<'a>,
+    span: oxc_span::Span,
+    expr: Expression<'a>,
+) -> Expression<'a> {
+    let _ = span;
+    let params =
+        ast.alloc_formal_parameters(SPAN, FormalParameterKind::FormalParameter, ast.vec(), NONE);
+    let mut statements = ast.vec_with_capacity(1);
+    statements.push(Statement::ReturnStatement(
+        ast.alloc_return_statement(SPAN, Some(expr)),
+    ));
+    let body = ast.alloc_function_body(SPAN, ast.vec(), statements);
+    ast.expression_function(
+        SPAN,
+        FunctionType::FunctionExpression,
+        None,
+        false,
+        false,
+        false,
+        NONE,
+        NONE,
+        params,
+        NONE,
+        Some(body),
+    )
+}
+
+fn is_valid_prop_identifier(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) if c == '$' || c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '$' || c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn make_prop_key<'a>(ast: AstBuilder<'a>, span: oxc_span::Span, raw_key: &str) -> PropertyKey<'a> {
+    let _ = span;
+    let key = ast.allocator.alloc_str(raw_key);
+    if is_valid_prop_identifier(raw_key) {
+        PropertyKey::StaticIdentifier(ast.alloc_identifier_name(SPAN, key))
+    } else {
+        PropertyKey::StringLiteral(ast.alloc_string_literal(SPAN, key, None))
+    }
+}
 
 /// Get children as SSR expression with recursive transformation
 fn get_children_ssr<'a, 'b>(
     element: &JSXElement<'a>,
+    context: &SSRContext<'a>,
     transform_child: SSRChildTransformer<'a, 'b>,
-) -> String {
-    let mut children: Vec<String> = vec![];
+) -> Expression<'a> {
+    let ast = context.ast();
+    let mut children: Vec<Expression<'a>> = Vec::new();
 
     for child in &element.children {
         match child {
             JSXChild::Text(text) => {
                 let content = common::expression::trim_whitespace(&text.value);
                 if !content.is_empty() {
-                    children.push(format!(
-                        "\"{}\"",
-                        common::expression::escape_html(&content, false)
+                    let escaped = common::expression::escape_html(&content, false);
+                    children.push(ast.expression_string_literal(
+                        SPAN,
+                        ast.allocator.alloc_str(&escaped),
+                        None,
                     ));
                 }
             }
             JSXChild::ExpressionContainer(container) => {
                 if let Some(expr) = container.expression.as_expression() {
-                    children.push(expr_to_string(expr));
+                    children.push(context.clone_expr(expr));
                 }
             }
             JSXChild::Element(_) | JSXChild::Fragment(_) => {
                 // Transform the child JSX element/fragment
                 if let Some(result) = transform_child(child) {
-                    children.push(result.to_ssr_call());
+                    children.push(result.to_ssr_expression(ast, false));
                 }
             }
             JSXChild::Spread(spread) => {
-                children.push(expr_to_string(&spread.expression));
+                children.push(context.clone_expr(&spread.expression));
             }
         }
     }
 
     if children.len() == 1 {
-        format!("() => {}", children.pop().unwrap_or_default())
+        children
+            .pop()
+            .unwrap_or_else(|| ast.expression_identifier(SPAN, "undefined"))
     } else if children.is_empty() {
-        "undefined".to_string()
+        ast.expression_identifier(SPAN, "undefined")
     } else {
-        format!("() => [{}]", children.join(", "))
+        let mut elements = ast.vec_with_capacity(children.len());
+        for expr in children {
+            elements.push(ArrayExpressionElement::from(expr));
+        }
+        ast.expression_array(SPAN, elements)
     }
 }
 
 /// Transform a component for SSR
 pub fn transform_component<'a, 'b>(
     element: &JSXElement<'a>,
-    tag_name: &str,
-    context: &SSRContext,
+    _tag_name: &str,
+    context: &SSRContext<'a>,
     options: &TransformOptions<'a>,
     transform_child: SSRChildTransformer<'a, 'b>,
-) -> SSRResult {
+) -> SSRResult<'a> {
+    let ast = context.ast();
     let mut result = SSRResult::new();
-
-    // Check if this is a built-in (For, Show, etc.)
-    if is_built_in(tag_name) {
-        return transform_builtin(element, tag_name, context, transform_child);
-    }
+    result.span = element.span;
 
     context.register_helper("createComponent");
     context.register_helper("escape");
@@ -80,156 +180,21 @@ pub fn transform_component<'a, 'b>(
     let props = build_props(element, context, options, transform_child);
 
     // Generate createComponent call - will be escaped by parent
-    result.push_dynamic(
-        format!("createComponent({}, {})", tag_name, props),
+    let component = jsx_element_name_to_expression(ast, &element.opening_element.name);
+    let callee = ast.expression_identifier(SPAN, "createComponent");
+    let mut args = ast.vec_with_capacity(2);
+    args.push(Argument::from(component));
+    args.push(Argument::from(props));
+    let call = ast.expression_call(
+        SPAN,
+        callee,
+        None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+        args,
         false,
-        false, // Components return escaped content
     );
-
-    result
-}
-
-/// Transform built-in control flow components for SSR
-fn transform_builtin<'a, 'b>(
-    element: &JSXElement<'a>,
-    tag_name: &str,
-    context: &SSRContext,
-    transform_child: SSRChildTransformer<'a, 'b>,
-) -> SSRResult {
-    let mut result = SSRResult::new();
-
-    context.register_helper("createComponent");
-    context.register_helper("escape");
-
-    // Note: Built-in components (For, Show, Switch, Match, Index, Suspense, Portal, Dynamic, ErrorBoundary)
-    // are expected to be imported by the user from solid-js or solid-js/web.
-    // We do NOT register them as helpers to avoid duplicate imports.
-
-    match tag_name {
-        "For" => {
-            let each = find_prop_value(element, "each").unwrap_or("[]".to_string());
-            let children = get_children_callback(element);
-            result.push_dynamic(
-                format!(
-                    "createComponent(For, {{ each: {}, children: {} }})",
-                    each, children
-                ),
-                false,
-                false,
-            );
-        }
-
-        "Show" => {
-            let when = find_prop_value(element, "when").unwrap_or("false".to_string());
-            let fallback = find_prop_value(element, "fallback").unwrap_or("undefined".to_string());
-            let children = get_children_ssr(element, transform_child);
-            result.push_dynamic(
-                format!(
-                    "createComponent(Show, {{ when: {}, fallback: {}, children: {} }})",
-                    when, fallback, children
-                ),
-                false,
-                false,
-            );
-        }
-
-        "Switch" => {
-            let children = get_children_ssr(element, transform_child);
-            result.push_dynamic(
-                format!("createComponent(Switch, {{ children: {} }})", children),
-                false,
-                false,
-            );
-        }
-
-        "Match" => {
-            let when = find_prop_value(element, "when").unwrap_or("false".to_string());
-            let children = get_children_ssr(element, transform_child);
-            result.push_dynamic(
-                format!(
-                    "createComponent(Match, {{ when: {}, children: {} }})",
-                    when, children
-                ),
-                false,
-                false,
-            );
-        }
-
-        "Index" => {
-            let each = find_prop_value(element, "each").unwrap_or("[]".to_string());
-            let children = get_children_callback(element);
-            result.push_dynamic(
-                format!(
-                    "createComponent(Index, {{ each: {}, children: {} }})",
-                    each, children
-                ),
-                false,
-                false,
-            );
-        }
-
-        "Suspense" => {
-            let fallback = find_prop_value(element, "fallback").unwrap_or("undefined".to_string());
-            let children = get_children_ssr(element, transform_child);
-            result.push_dynamic(
-                format!(
-                    "createComponent(Suspense, {{ fallback: {}, children: {} }})",
-                    fallback, children
-                ),
-                false,
-                false,
-            );
-        }
-
-        "Portal" => {
-            // Portal in SSR just renders children (no mount target on server)
-            let children = get_children_ssr(element, transform_child);
-            result.push_dynamic(
-                format!("createComponent(Portal, {{ children: {} }})", children),
-                false,
-                false,
-            );
-        }
-
-        "Dynamic" => {
-            let component =
-                find_prop_value(element, "component").unwrap_or("undefined".to_string());
-            result.push_dynamic(
-                format!("createComponent(Dynamic, {{ component: {} }})", component),
-                false,
-                false,
-            );
-        }
-
-        "ErrorBoundary" => {
-            let fallback = find_prop_value(element, "fallback").unwrap_or("undefined".to_string());
-            let children = get_children_ssr(element, transform_child);
-            result.push_dynamic(
-                format!(
-                    "createComponent(ErrorBoundary, {{ fallback: {}, children: {} }})",
-                    fallback, children
-                ),
-                false,
-                false,
-            );
-        }
-
-        "NoHydration" => {
-            // Special SSR component - renders children without hydration markers
-            context.register_helper("NoHydration");
-            let children = get_children_ssr(element, transform_child);
-            result.push_dynamic(
-                format!("createComponent(NoHydration, {{ children: {} }})", children),
-                false,
-                true, // Don't escape - it handles its own output
-            );
-        }
-
-        _ => {
-            // Unknown built-in, treat as regular component
-            result.push_dynamic(format!("createComponent({}, {{}})", tag_name), false, false);
-        }
-    }
+    result.push_dynamic(
+        call, false, false, // Components return escaped content
+    );
 
     result
 }
@@ -237,101 +202,156 @@ fn transform_builtin<'a, 'b>(
 /// Build props object for a component
 fn build_props<'a, 'b>(
     element: &JSXElement<'a>,
-    context: &SSRContext,
+    context: &SSRContext<'a>,
     _options: &TransformOptions<'a>,
     transform_child: SSRChildTransformer<'a, 'b>,
-) -> String {
-    fn is_valid_prop_identifier(key: &str) -> bool {
-        let mut chars = key.chars();
-        match chars.next() {
-            Some(c) if c == '$' || c == '_' || c.is_ascii_alphabetic() => {}
-            _ => return false,
-        }
+) -> Expression<'a> {
+    let ast = context.ast();
+    let span = SPAN;
 
-        chars.all(|c| c == '$' || c == '_' || c.is_ascii_alphanumeric())
-    }
-
-    fn format_prop_key(key: &str) -> String {
-        if is_valid_prop_identifier(key) {
-            return key.to_string();
-        }
-
-        let escaped = key.replace('\\', "\\\\").replace('"', "\\\"");
-        format!("\"{}\"", escaped)
-    }
-
-    let mut static_props: Vec<String> = vec![];
-    let mut dynamic_props: Vec<String> = vec![];
-    let mut spreads: Vec<String> = vec![];
+    let mut static_props: Vec<ObjectPropertyKind<'a>> = Vec::new();
+    let mut dynamic_props: Vec<ObjectPropertyKind<'a>> = Vec::new();
+    let mut spreads: Vec<Expression<'a>> = Vec::new();
 
     for attr in &element.opening_element.attributes {
         match attr {
             JSXAttributeItem::Attribute(attr) => {
-                let raw_key = match &attr.name {
-                    JSXAttributeName::Identifier(id) => id.name.to_string(),
+                let raw_key: String = match &attr.name {
+                    JSXAttributeName::Identifier(id) => id.name.as_str().to_string(),
                     JSXAttributeName::NamespacedName(ns) => {
                         format!("{}:{}", ns.namespace.name, ns.name.name)
                     }
                 };
-                let key = format_prop_key(&raw_key);
+                let key = make_prop_key(ast, span, &raw_key);
 
                 // Skip event handlers and refs in SSR
                 if raw_key.starts_with("on") || raw_key == "ref" || raw_key.starts_with("use:") {
                     continue;
                 }
 
+                // Ignore explicit `children` prop when actual JSX children exist.
+                // JSX children win over `children={...}`.
+                if raw_key == "children" && !element.children.is_empty() {
+                    continue;
+                }
+
                 match &attr.value {
                     Some(JSXAttributeValue::StringLiteral(lit)) => {
-                        static_props.push(format!("{}: \"{}\"", key, lit.value));
+                        static_props.push(ast.object_property_kind_object_property(
+                            span,
+                            PropertyKind::Init,
+                            key,
+                            ast.expression_string_literal(
+                                span,
+                                ast.allocator.alloc_str(&lit.value),
+                                None,
+                            ),
+                            false,
+                            false,
+                            false,
+                        ));
                     }
                     Some(JSXAttributeValue::ExpressionContainer(container)) => {
                         if let Some(expr) = container.expression.as_expression() {
-                            let expr_str = expr_to_string(expr);
                             if is_dynamic(expr) {
-                                dynamic_props
-                                    .push(format!("get {}() {{ return {}; }}", key, expr_str));
+                                dynamic_props.push(ast.object_property_kind_object_property(
+                                    span,
+                                    PropertyKind::Get,
+                                    key,
+                                    getter_return_expr(ast, span, context.clone_expr(expr)),
+                                    false,
+                                    false,
+                                    false,
+                                ));
                             } else {
-                                static_props.push(format!("{}: {}", key, expr_str));
+                                static_props.push(ast.object_property_kind_object_property(
+                                    span,
+                                    PropertyKind::Init,
+                                    key,
+                                    context.clone_expr(expr),
+                                    false,
+                                    false,
+                                    false,
+                                ));
                             }
                         }
                     }
                     None => {
-                        static_props.push(format!("{}: true", key));
+                        static_props.push(ast.object_property_kind_object_property(
+                            span,
+                            PropertyKind::Init,
+                            key,
+                            ast.expression_boolean_literal(span, true),
+                            false,
+                            false,
+                            false,
+                        ));
                     }
                     _ => {}
                 }
             }
             JSXAttributeItem::SpreadAttribute(spread) => {
-                spreads.push(expr_to_string(&spread.argument));
+                spreads.push(context.clone_expr(&spread.argument));
             }
         }
     }
 
     // Handle children
     if !element.children.is_empty() {
-        let children = get_children_ssr(element, transform_child);
-        dynamic_props.push(format!("get children() {{ return {}; }}", children));
+        let children = get_children_ssr(element, context, transform_child);
+        let key = make_prop_key(ast, span, "children");
+        if is_dynamic(&children) {
+            let getter = getter_return_expr(ast, span, children);
+            dynamic_props.push(ast.object_property_kind_object_property(
+                span,
+                PropertyKind::Get,
+                key,
+                getter,
+                false,
+                false,
+                false,
+            ));
+        } else {
+            static_props.push(ast.object_property_kind_object_property(
+                span,
+                PropertyKind::Init,
+                key,
+                children,
+                false,
+                false,
+                false,
+            ));
+        }
     }
 
-    // Combine all props
-    let all_props = static_props
-        .into_iter()
-        .chain(dynamic_props)
-        .collect::<Vec<_>>()
-        .join(", ");
+    let has_inline_props = !static_props.is_empty() || !dynamic_props.is_empty();
+    let mut props = ast.vec_with_capacity(static_props.len() + dynamic_props.len());
+    for prop in static_props {
+        props.push(prop);
+    }
+    for prop in dynamic_props {
+        props.push(prop);
+    }
 
     // Combine props
     if !spreads.is_empty() {
         context.register_helper("mergeProps");
-        let spread_list = spreads.join(", ");
-        if all_props.is_empty() {
-            format!("mergeProps({})", spread_list)
-        } else {
-            format!("mergeProps({}, {{ {} }})", spread_list, all_props)
+        let callee = ast.expression_identifier(span, "mergeProps");
+        let mut args = ast.vec_with_capacity(spreads.len() + if has_inline_props { 1 } else { 0 });
+        for spread in spreads {
+            args.push(Argument::from(spread));
         }
-    } else if all_props.is_empty() {
-        "{}".to_string()
+        if has_inline_props {
+            args.push(Argument::from(ast.expression_object(span, props)));
+        }
+        ast.expression_call(
+            span,
+            callee,
+            None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+            args,
+            false,
+        )
     } else {
-        format!("{{ {} }}", all_props)
+        ast.expression_object(span, props)
     }
 }

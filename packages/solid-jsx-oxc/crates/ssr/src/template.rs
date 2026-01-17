@@ -6,7 +6,7 @@
 use crate::ir::{SSRContext, SSRResult};
 
 /// Generate the final SSR output code from a result
-pub fn generate_ssr_code(result: &SSRResult, context: &SSRContext) -> String {
+pub fn generate_ssr_code(result: &SSRResult, context: &SSRContext<'_>) -> String {
     let mut code = String::new();
 
     // Generate helper imports

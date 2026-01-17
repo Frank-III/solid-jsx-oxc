@@ -3,20 +3,28 @@
 //! SSR uses a simpler IR than DOM since we're just building template strings.
 
 use indexmap::IndexSet;
+use oxc_allocator::{Allocator, CloneIn};
 use oxc_ast::ast::JSXChild;
+use oxc_ast::ast::{Argument, Expression, TemplateElementValue};
+use oxc_ast::AstBuilder;
+use oxc_span::{Span, SPAN};
 use std::cell::RefCell;
 
+use common::expr_to_string;
+
 /// Function type for transforming child JSX elements
-pub type SSRChildTransformer<'a, 'b> = &'b dyn Fn(&JSXChild<'a>) -> Option<SSRResult>;
+pub type SSRChildTransformer<'a, 'b> = &'b dyn Fn(&JSXChild<'a>) -> Option<SSRResult<'a>>;
 
 /// The result of transforming a JSX node for SSR
-#[derive(Default)]
-pub struct SSRResult {
+pub struct SSRResult<'a> {
+    /// Source span of the originating JSX node
+    pub span: Span,
+
     /// Static template parts (the strings between dynamic values)
     pub template_parts: Vec<String>,
 
     /// Dynamic values to be interpolated (wrapped in escape())
-    pub template_values: Vec<TemplateValue>,
+    pub template_values: Vec<TemplateValue<'a>>,
 
     /// Whether this needs a hydration key
     pub needs_hydration_key: bool,
@@ -32,9 +40,9 @@ pub struct SSRResult {
 }
 
 /// A dynamic value in the SSR template
-pub struct TemplateValue {
-    /// The expression code
-    pub expr: String,
+pub struct TemplateValue<'a> {
+    /// The expression AST
+    pub expr: Expression<'a>,
 
     /// Whether this is an attribute value (uses different escaping)
     pub is_attr: bool,
@@ -46,7 +54,21 @@ pub struct TemplateValue {
     pub needs_hydration_marker: bool,
 }
 
-impl SSRResult {
+impl<'a> Default for SSRResult<'a> {
+    fn default() -> Self {
+        Self {
+            span: SPAN,
+            template_parts: Vec::new(),
+            template_values: Vec::new(),
+            needs_hydration_key: false,
+            skip_escape: false,
+            has_spread: false,
+            tag_name: None,
+        }
+    }
+}
+
+impl<'a> SSRResult<'a> {
     /// Create a new empty SSR result
     pub fn new() -> Self {
         Self::default()
@@ -63,14 +85,14 @@ impl SSRResult {
     }
 
     /// Append a dynamic value
-    pub fn push_dynamic(&mut self, expr: String, is_attr: bool, skip_escape: bool) {
+    pub fn push_dynamic(&mut self, expr: Expression<'a>, is_attr: bool, skip_escape: bool) {
         self.push_dynamic_with_marker(expr, is_attr, skip_escape, !is_attr)
     }
 
     /// Append a dynamic value with explicit hydration marker control
     pub fn push_dynamic_with_marker(
         &mut self,
-        expr: String,
+        expr: Expression<'a>,
         is_attr: bool,
         skip_escape: bool,
         needs_marker: bool,
@@ -90,7 +112,7 @@ impl SSRResult {
     }
 
     /// Merge another SSR result into this one
-    pub fn merge(&mut self, other: SSRResult) {
+    pub fn merge(&mut self, other: SSRResult<'a>) {
         for (i, part) in other.template_parts.into_iter().enumerate() {
             if i == 0 && !self.template_parts.is_empty() {
                 // Merge first part with our last part
@@ -128,11 +150,11 @@ impl SSRResult {
 
                     result.push_str("${");
                     if val.skip_escape {
-                        result.push_str(&val.expr);
+                        result.push_str(&expr_to_string(&val.expr));
                     } else if val.is_attr {
-                        result.push_str(&format!("escape({}, true)", val.expr));
+                        result.push_str(&format!("escape({}, true)", expr_to_string(&val.expr)));
                     } else {
-                        result.push_str(&format!("escape({})", val.expr));
+                        result.push_str(&format!("escape({})", expr_to_string(&val.expr)));
                     }
                     result.push('}');
 
@@ -147,11 +169,85 @@ impl SSRResult {
             result
         }
     }
+
+    pub fn to_ssr_expression(&self, ast: AstBuilder<'a>, hydratable: bool) -> Expression<'a> {
+        let gen_span = SPAN;
+
+        if self.template_values.is_empty() {
+            let content = self.template_parts.join("");
+            let allocated_str = ast.allocator.alloc_str(&content);
+            return ast.expression_string_literal(gen_span, allocated_str, None);
+        }
+
+        // Build quasis (static template parts)
+        let mut quasis = ast.vec();
+        let mut closing_marker_prefix = String::new();
+        for (i, part) in self.template_parts.iter().enumerate() {
+            let mut raw = String::new();
+            raw.push_str(&closing_marker_prefix);
+            closing_marker_prefix.clear();
+            raw.push_str(part);
+
+            if i < self.template_values.len() {
+                let val = &self.template_values[i];
+                if hydratable && !val.is_attr && val.needs_hydration_marker {
+                    raw.push_str("<!--#-->");
+                    closing_marker_prefix.push_str("<!--/-->");
+                }
+            }
+
+            let is_tail = i == self.template_parts.len() - 1;
+            let part_str = ast.allocator.alloc_str(&raw);
+            let value = TemplateElementValue {
+                raw: ast.atom(part_str),
+                cooked: Some(ast.atom(part_str)),
+            };
+            let element = ast.template_element(gen_span, value, is_tail);
+            quasis.push(element);
+        }
+
+        // Build expressions (dynamic parts)
+        let mut expressions = ast.vec();
+        for val in &self.template_values {
+            let expr = val.expr.clone_in(ast.allocator);
+            let wrapped = if val.skip_escape {
+                expr
+            } else {
+                let callee = ast.expression_identifier(gen_span, "escape");
+                let mut args = ast.vec();
+                args.push(Argument::from(expr));
+                if val.is_attr {
+                    let true_lit = ast.expression_boolean_literal(gen_span, true);
+                    args.push(Argument::from(true_lit));
+                }
+                ast.expression_call(
+                    gen_span,
+                    callee,
+                    None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+                    args,
+                    false,
+                )
+            };
+            expressions.push(wrapped);
+        }
+
+        // Build the template literal
+        let template = ast.template_literal(gen_span, quasis, expressions);
+
+        // Build the tag (ssr identifier)
+        let tag = ast.expression_identifier(gen_span, "ssr");
+
+        ast.expression_tagged_template(
+            gen_span,
+            tag,
+            None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+            template,
+        )
+    }
 }
 
 /// Context for SSR block transformation
-#[derive(Default)]
-pub struct SSRContext {
+pub struct SSRContext<'a> {
     /// Helper imports needed
     pub helpers: RefCell<IndexSet<String>>,
 
@@ -160,14 +256,17 @@ pub struct SSRContext {
 
     /// Whether we're in hydratable mode
     pub hydratable: bool,
+
+    allocator: &'a Allocator,
 }
 
-impl SSRContext {
-    pub fn new(hydratable: bool) -> Self {
+impl<'a> SSRContext<'a> {
+    pub fn new(allocator: &'a Allocator, hydratable: bool) -> Self {
         Self {
             helpers: RefCell::new(IndexSet::new()),
             var_counter: RefCell::new(0),
             hydratable,
+            allocator,
         }
     }
 
@@ -181,5 +280,13 @@ impl SSRContext {
     /// Register a helper import
     pub fn register_helper(&self, name: &str) {
         self.helpers.borrow_mut().insert(name.to_string());
+    }
+
+    pub fn ast(&self) -> AstBuilder<'a> {
+        AstBuilder::new(self.allocator)
+    }
+
+    pub fn clone_expr(&self, expr: &Expression<'a>) -> Expression<'a> {
+        expr.clone_in(self.allocator)
     }
 }

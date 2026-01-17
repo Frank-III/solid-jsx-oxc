@@ -1,34 +1,115 @@
 //! Native element transform
 //! Handles <div>, <span>, etc. -> template + effects
 
-use oxc_ast::ast::{JSXAttribute, JSXAttributeItem, JSXAttributeValue, JSXElement};
+use oxc_allocator::CloneIn;
+use oxc_ast::ast::{
+    Argument, AssignmentTarget, Expression, FormalParameterKind, JSXAttribute, JSXAttributeItem,
+    JSXAttributeValue, JSXElement, Statement,
+};
+use oxc_ast::AstBuilder;
+use oxc_ast::NONE;
+use oxc_span::{Span, SPAN};
+use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, UnaryOperator};
 
 use common::{
     constants::{ALIASES, DELEGATED_EVENTS, VOID_ELEMENTS},
-    expr_to_string,
     expression::{escape_html, to_event_name},
     get_attr_name, is_component, is_dynamic, is_namespaced_attr, is_svg_element, TransformOptions,
 };
 
-use crate::ir::{
-    BlockContext, ChildTransformer, Declaration, DynamicBinding, Expr, TransformResult,
-};
+use crate::ir::{BlockContext, ChildTransformer, Declaration, DynamicBinding, TransformResult};
 use crate::transform::TransformInfo;
+
+fn ident_expr<'a>(ast: AstBuilder<'a>, span: Span, name: &str) -> Expression<'a> {
+    let _ = span;
+    ast.expression_identifier(SPAN, ast.allocator.alloc_str(name))
+}
+
+fn static_member<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    object: Expression<'a>,
+    property: &str,
+) -> Expression<'a> {
+    let _ = span;
+    let prop = ast.identifier_name(SPAN, ast.allocator.alloc_str(property));
+    Expression::StaticMemberExpression(
+        ast.alloc_static_member_expression(SPAN, object, prop, false),
+    )
+}
+
+fn call_expr<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    callee: Expression<'a>,
+    args: impl IntoIterator<Item = Expression<'a>>,
+) -> Expression<'a> {
+    let _ = span;
+    let mut arguments = ast.vec();
+    for arg in args {
+        arguments.push(Argument::from(arg));
+    }
+    ast.expression_call(
+        SPAN,
+        callee,
+        None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+        arguments,
+        false,
+    )
+}
+
+fn arrow_zero_params_return_expr<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    expr: Expression<'a>,
+) -> Expression<'a> {
+    let _ = span;
+    let params = ast.alloc_formal_parameters(
+        SPAN,
+        FormalParameterKind::ArrowFormalParameters,
+        ast.vec(),
+        NONE,
+    );
+    let mut statements = ast.vec_with_capacity(1);
+    statements.push(Statement::ExpressionStatement(
+        ast.alloc_expression_statement(SPAN, expr),
+    ));
+    let body = ast.alloc_function_body(SPAN, ast.vec(), statements);
+    ast.expression_arrow_function(SPAN, true, false, NONE, params, NONE, body)
+}
+
+fn expression_to_assignment_target<'a>(expr: Expression<'a>) -> Option<AssignmentTarget<'a>> {
+    match expr {
+        Expression::Identifier(ident) => Some(AssignmentTarget::AssignmentTargetIdentifier(ident)),
+        Expression::StaticMemberExpression(m) => Some(AssignmentTarget::StaticMemberExpression(m)),
+        Expression::ComputedMemberExpression(m) => {
+            Some(AssignmentTarget::ComputedMemberExpression(m))
+        }
+        Expression::PrivateFieldExpression(m) => Some(AssignmentTarget::PrivateFieldExpression(m)),
+        Expression::TSAsExpression(e) => Some(AssignmentTarget::TSAsExpression(e)),
+        Expression::TSSatisfiesExpression(e) => Some(AssignmentTarget::TSSatisfiesExpression(e)),
+        Expression::TSNonNullExpression(e) => Some(AssignmentTarget::TSNonNullExpression(e)),
+        Expression::TSTypeAssertion(e) => Some(AssignmentTarget::TSTypeAssertion(e)),
+        _ => None,
+    }
+}
 
 /// Transform a native HTML/SVG element
 pub fn transform_element<'a, 'b>(
     element: &JSXElement<'a>,
     tag_name: &str,
     info: &TransformInfo,
-    context: &BlockContext,
+    context: &BlockContext<'a>,
     options: &TransformOptions<'a>,
     transform_child: ChildTransformer<'a, 'b>,
-) -> TransformResult {
+) -> TransformResult<'a> {
+    let ast = context.ast();
     let is_svg = is_svg_element(tag_name);
     let is_void = VOID_ELEMENTS.contains(tag_name);
     let is_custom_element = tag_name.contains('-');
 
     let mut result = TransformResult {
+        span: element.span,
         tag_name: Some(tag_name.to_string()),
         is_svg,
         has_custom_element: is_custom_element,
@@ -46,13 +127,14 @@ pub fn transform_element<'a, 'b>(
         // If we have a path, we need to walk to this element
         if !info.path.is_empty() {
             if let Some(root_id) = &info.root_id {
-                let walk_expr = info
-                    .path
-                    .iter()
-                    .fold(root_id.clone(), |acc, step| format!("{}.{}", acc, step));
                 result.declarations.push(Declaration {
                     name: elem_id.clone(),
-                    init: walk_expr,
+                    init: info
+                        .path
+                        .iter()
+                        .fold(ident_expr(ast, element.span, root_id), |acc, step| {
+                            static_member(ast, element.span, acc, step)
+                        }),
                 });
             }
         }
@@ -174,10 +256,11 @@ fn element_needs_runtime_access(element: &JSXElement) -> bool {
 /// Transform element attributes
 fn transform_attributes<'a>(
     element: &JSXElement<'a>,
-    result: &mut TransformResult,
-    context: &BlockContext,
+    result: &mut TransformResult<'a>,
+    context: &BlockContext<'a>,
     options: &TransformOptions<'a>,
 ) {
+    let ast = context.ast();
     let elem_id = result.id.clone();
 
     for attr in &element.opening_element.attributes {
@@ -191,16 +274,15 @@ fn transform_attributes<'a>(
                     .as_deref()
                     .expect("Spread attributes require an element id");
                 context.register_helper("spread");
-                let spread_expr = expr_to_string(&spread.argument);
-                result.exprs.push(Expr {
-                    code: format!(
-                        "spread({}, {}, {}, {})",
-                        elem_id,
-                        spread_expr,
-                        result.is_svg,
-                        !element.children.is_empty()
-                    ),
-                });
+                let callee = ident_expr(ast, spread.span, "spread");
+                let elem = ident_expr(ast, spread.span, elem_id);
+                let args = [
+                    elem,
+                    context.clone_expr(&spread.argument),
+                    ast.expression_boolean_literal(SPAN, result.is_svg),
+                    ast.expression_boolean_literal(SPAN, !element.children.is_empty()),
+                ];
+                result.exprs.push(call_expr(ast, spread.span, callee, args));
             }
         }
     }
@@ -210,8 +292,8 @@ fn transform_attributes<'a>(
 fn transform_attribute<'a>(
     attr: &JSXAttribute<'a>,
     elem_id: Option<&str>,
-    result: &mut TransformResult,
-    context: &BlockContext,
+    result: &mut TransformResult<'a>,
+    context: &BlockContext<'a>,
     options: &TransformOptions<'a>,
 ) {
     let key = get_attr_name(&attr.name);
@@ -275,14 +357,13 @@ fn transform_attribute<'a>(
         Some(JSXAttributeValue::ExpressionContainer(container)) => {
             // Dynamic attribute - needs effect
             if let Some(expr) = container.expression.as_expression() {
-                let expr_str = expr_to_string(expr);
                 if is_dynamic(expr) {
                     // Dynamic - wrap in effect
                     let elem_id = elem_id.expect("dynamic attributes require an element id");
                     result.dynamics.push(DynamicBinding {
                         elem: elem_id.to_string(),
                         key: key.clone(),
-                        value: expr_str,
+                        value: context.clone_expr(expr),
                         is_svg: result.is_svg,
                         is_ce: result.has_custom_element,
                         tag_name: result.tag_name.clone().unwrap_or_default(),
@@ -294,7 +375,7 @@ fn transform_attribute<'a>(
                     result.dynamics.push(DynamicBinding {
                         elem: elem_id.to_string(),
                         key: key.clone(),
-                        value: expr_str,
+                        value: context.clone_expr(expr),
                         is_svg: result.is_svg,
                         is_ce: result.has_custom_element,
                         tag_name: result.tag_name.clone().unwrap_or_default(),
@@ -314,28 +395,62 @@ fn transform_attribute<'a>(
 fn transform_ref<'a>(
     attr: &JSXAttribute<'a>,
     elem_id: &str,
-    result: &mut TransformResult,
-    _context: &BlockContext,
+    result: &mut TransformResult<'a>,
+    context: &BlockContext<'a>,
 ) {
+    let ast = context.ast();
     if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
         if let Some(expr) = container.expression.as_expression() {
-            let ref_expr = expr_to_string(expr);
+            let ref_expr = context.clone_expr(expr);
+            let elem = ident_expr(ast, attr.span, elem_id);
             // Check if it's a function expression (arrow function or function expression)
-            if ref_expr.contains("=>") || ref_expr.starts_with("function") {
+            if matches!(
+                expr,
+                Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+            ) {
                 // It's an inline callback: ref={el => myRef = el}
                 // Just invoke it with the element
-                result.exprs.push(Expr {
-                    code: format!("({})({})", ref_expr, elem_id),
-                });
+                result
+                    .exprs
+                    .push(call_expr(ast, attr.span, ref_expr, [elem]));
             } else {
                 // It's a variable reference: ref={myRef}
                 // Could be a signal setter or plain variable - check at runtime
-                result.exprs.push(Expr {
-                    code: format!(
-                        "typeof {} === \"function\" ? {}({}) : {} = {}",
-                        ref_expr, ref_expr, elem_id, ref_expr, elem_id
-                    ),
-                });
+                let typeof_ref = ast.expression_unary(
+                    SPAN,
+                    UnaryOperator::Typeof,
+                    ref_expr.clone_in(ast.allocator),
+                );
+                let function_str =
+                    ast.expression_string_literal(SPAN, ast.allocator.alloc_str("function"), None);
+                let test = ast.expression_binary(
+                    SPAN,
+                    typeof_ref,
+                    BinaryOperator::StrictEquality,
+                    function_str,
+                );
+
+                let call = call_expr(
+                    ast,
+                    attr.span,
+                    ref_expr.clone_in(ast.allocator),
+                    [elem.clone_in(ast.allocator)],
+                );
+
+                let assign = expression_to_assignment_target(ref_expr.clone_in(ast.allocator))
+                    .map(|target| {
+                        ast.expression_assignment(
+                            SPAN,
+                            AssignmentOperator::Assign,
+                            target,
+                            elem.clone_in(ast.allocator),
+                        )
+                    })
+                    .unwrap_or_else(|| ast.expression_identifier(SPAN, "undefined"));
+
+                result
+                    .exprs
+                    .push(ast.expression_conditional(SPAN, test, call, assign));
             }
         }
     }
@@ -346,10 +461,11 @@ fn transform_event<'a>(
     attr: &JSXAttribute<'a>,
     key: &str,
     elem_id: &str,
-    result: &mut TransformResult,
-    context: &BlockContext,
+    result: &mut TransformResult<'a>,
+    context: &BlockContext<'a>,
     options: &TransformOptions<'a>,
 ) {
+    let ast = context.ast();
     // Check for capture mode (onClickCapture -> click with capture=true)
     let is_capture = key.ends_with("Capture");
     let base_key = if is_capture {
@@ -361,15 +477,17 @@ fn transform_event<'a>(
     let event_name = to_event_name(base_key);
 
     // Get the handler expression
-    let handler = if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
-        container
-            .expression
-            .as_expression()
-            .map(|e| expr_to_string(e))
-            .unwrap_or_else(|| "undefined".to_string())
-    } else {
-        "undefined".to_string()
-    };
+    let handler = attr
+        .value
+        .as_ref()
+        .and_then(|v| match v {
+            JSXAttributeValue::ExpressionContainer(container) => {
+                container.expression.as_expression()
+            }
+            _ => None,
+        })
+        .map(|e| context.clone_expr(e))
+        .unwrap_or_else(|| ast.expression_identifier(SPAN, "undefined"));
 
     // on: prefix forces non-delegation (direct addEventListener)
     let force_no_delegate = key.starts_with("on:");
@@ -384,17 +502,30 @@ fn transform_event<'a>(
 
     if should_delegate {
         context.register_delegate(&event_name);
-        result.exprs.push(Expr {
-            code: format!("{}.$${} = {}", elem_id, event_name, handler),
-        });
+        let elem = ident_expr(ast, attr.span, elem_id);
+        let prop = format!("$${}", event_name);
+        let member = static_member(ast, attr.span, elem, &prop);
+        let Some(target) = expression_to_assignment_target(member) else {
+            return;
+        };
+        result.exprs.push(ast.expression_assignment(
+            SPAN,
+            AssignmentOperator::Assign,
+            target,
+            handler,
+        ));
     } else {
         context.register_helper("addEventListener");
-        result.exprs.push(Expr {
-            code: format!(
-                "addEventListener({}, \"{}\", {}, {})",
-                elem_id, event_name, handler, is_capture
-            ),
-        });
+        let callee = ident_expr(ast, attr.span, "addEventListener");
+        let elem = ident_expr(ast, attr.span, elem_id);
+        let event = ast.expression_string_literal(SPAN, ast.allocator.alloc_str(&event_name), None);
+        let capture = ast.expression_boolean_literal(SPAN, is_capture);
+        result.exprs.push(call_expr(
+            ast,
+            attr.span,
+            callee,
+            [elem, event, handler, capture],
+        ));
     }
 }
 
@@ -403,25 +534,36 @@ fn transform_directive<'a>(
     attr: &JSXAttribute<'a>,
     key: &str,
     elem_id: &str,
-    result: &mut TransformResult,
-    context: &BlockContext,
+    result: &mut TransformResult<'a>,
+    context: &BlockContext<'a>,
 ) {
+    let ast = context.ast();
     context.register_helper("use");
     let directive_name = &key[4..]; // Strip "use:"
 
-    let value = if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
-        container
-            .expression
-            .as_expression()
-            .map(|e| format!("() => {}", expr_to_string(e)))
-            .unwrap_or_else(|| "undefined".to_string())
-    } else {
-        "undefined".to_string()
-    };
+    let value = attr
+        .value
+        .as_ref()
+        .and_then(|v| match v {
+            JSXAttributeValue::ExpressionContainer(container) => {
+                container.expression.as_expression()
+            }
+            _ => None,
+        })
+        .map(|e| arrow_zero_params_return_expr(ast, attr.span, context.clone_expr(e)))
+        .unwrap_or_else(|| ast.expression_identifier(SPAN, "undefined"));
 
-    result.exprs.push(Expr {
-        code: format!("use({}, {}, {})", directive_name, elem_id, value),
-    });
+    let callee = ident_expr(ast, attr.span, "use");
+    result.exprs.push(call_expr(
+        ast,
+        attr.span,
+        callee,
+        [
+            ident_expr(ast, attr.span, directive_name),
+            ident_expr(ast, attr.span, elem_id),
+            value,
+        ],
+    ));
 }
 
 /// Transform prop: prefix (direct DOM property assignment)
@@ -429,23 +571,35 @@ fn transform_prop<'a>(
     attr: &JSXAttribute<'a>,
     key: &str,
     elem_id: &str,
-    result: &mut TransformResult,
-    context: &BlockContext,
+    result: &mut TransformResult<'a>,
+    context: &BlockContext<'a>,
 ) {
+    let ast = context.ast();
     let prop_name = &key[5..]; // Strip "prop:"
 
     if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
         if let Some(expr) = container.expression.as_expression() {
-            let expr_str = expr_to_string(expr);
+            let elem = ident_expr(ast, attr.span, elem_id);
+            let member = static_member(ast, attr.span, elem, prop_name);
+            let Some(target) = expression_to_assignment_target(member) else {
+                return;
+            };
+            let assign = ast.expression_assignment(
+                SPAN,
+                AssignmentOperator::Assign,
+                target,
+                context.clone_expr(expr),
+            );
+
             if is_dynamic(expr) {
                 context.register_helper("effect");
-                result.exprs.push(Expr {
-                    code: format!("effect(() => {}.{} = {})", elem_id, prop_name, expr_str),
-                });
+                let effect = ident_expr(ast, attr.span, "effect");
+                let arrow = arrow_zero_params_return_expr(ast, attr.span, assign);
+                result
+                    .exprs
+                    .push(call_expr(ast, attr.span, effect, [arrow]));
             } else {
-                result.exprs.push(Expr {
-                    code: format!("{}.{} = {}", elem_id, prop_name, expr_str),
-                });
+                result.exprs.push(assign);
             }
         }
     }
@@ -456,22 +610,26 @@ fn transform_attr<'a>(
     attr: &JSXAttribute<'a>,
     key: &str,
     elem_id: &str,
-    result: &mut TransformResult,
-    context: &BlockContext,
+    result: &mut TransformResult<'a>,
+    context: &BlockContext<'a>,
 ) {
+    let ast = context.ast();
     let attr_name = &key[5..]; // Strip "attr:"
 
     if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
         if let Some(expr) = container.expression.as_expression() {
-            let expr_str = expr_to_string(expr);
             context.register_helper("effect");
             context.register_helper("setAttribute");
-            result.exprs.push(Expr {
-                code: format!(
-                    "effect(() => {}.setAttribute(\"{}\", {}))",
-                    elem_id, attr_name, expr_str
-                ),
-            });
+            let elem = ident_expr(ast, attr.span, elem_id);
+            let set_attr = static_member(ast, attr.span, elem, "setAttribute");
+            let name =
+                ast.expression_string_literal(SPAN, ast.allocator.alloc_str(attr_name), None);
+            let call = call_expr(ast, attr.span, set_attr, [name, context.clone_expr(expr)]);
+            let arrow = arrow_zero_params_return_expr(ast, attr.span, call);
+            let effect = ident_expr(ast, attr.span, "effect");
+            result
+                .exprs
+                .push(call_expr(ast, attr.span, effect, [arrow]));
         }
     } else if let Some(JSXAttributeValue::StringLiteral(lit)) = &attr.value {
         // Static value - inline in template
@@ -486,9 +644,10 @@ fn transform_attr<'a>(
 fn transform_style<'a>(
     attr: &JSXAttribute<'a>,
     elem_id: Option<&str>,
-    result: &mut TransformResult,
-    context: &BlockContext,
+    result: &mut TransformResult<'a>,
+    context: &BlockContext<'a>,
 ) {
+    let ast = context.ast();
     match &attr.value {
         Some(JSXAttributeValue::StringLiteral(lit)) => {
             // Static style string - inline in template
@@ -498,8 +657,6 @@ fn transform_style<'a>(
         }
         Some(JSXAttributeValue::ExpressionContainer(container)) => {
             if let Some(expr) = container.expression.as_expression() {
-                let expr_str = expr_to_string(expr);
-
                 // Check if it's an object expression (static object)
                 if let oxc_ast::ast::Expression::ObjectExpression(obj) = expr {
                     // Try to convert to static style string
@@ -514,15 +671,18 @@ fn transform_style<'a>(
                 // Dynamic style - use style helper
                 let elem_id = elem_id.expect("style helper requires an element id");
                 context.register_helper("style");
+                let elem = ident_expr(ast, attr.span, elem_id);
+                let style = ident_expr(ast, attr.span, "style");
+                let call = call_expr(ast, attr.span, style, [elem, context.clone_expr(expr)]);
                 if is_dynamic(expr) {
                     context.register_helper("effect");
-                    result.exprs.push(Expr {
-                        code: format!("effect(() => style({}, {}))", elem_id, expr_str),
-                    });
+                    let arrow = arrow_zero_params_return_expr(ast, attr.span, call);
+                    let effect = ident_expr(ast, attr.span, "effect");
+                    result
+                        .exprs
+                        .push(call_expr(ast, attr.span, effect, [arrow]));
                 } else {
-                    result.exprs.push(Expr {
-                        code: format!("style({}, {})", elem_id, expr_str),
-                    });
+                    result.exprs.push(call);
                 }
             }
         }
@@ -641,34 +801,54 @@ fn transform_inner_content<'a>(
     attr: &JSXAttribute<'a>,
     key: &str,
     elem_id: &str,
-    result: &mut TransformResult,
-    context: &BlockContext,
+    result: &mut TransformResult<'a>,
+    context: &BlockContext<'a>,
 ) {
+    let ast = context.ast();
     if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
         if let Some(expr) = container.expression.as_expression() {
-            let expr_str = expr_to_string(expr);
+            let elem = ident_expr(ast, attr.span, elem_id);
+            let member = static_member(ast, attr.span, elem, key);
+            let Some(target) = expression_to_assignment_target(member) else {
+                return;
+            };
+            let assign = ast.expression_assignment(
+                SPAN,
+                AssignmentOperator::Assign,
+                target,
+                context.clone_expr(expr),
+            );
 
             if is_dynamic(expr) {
                 context.register_helper("effect");
-                result.exprs.push(Expr {
-                    code: format!("effect(() => {}.{} = {})", elem_id, key, expr_str),
-                });
+                let arrow = arrow_zero_params_return_expr(ast, attr.span, assign);
+                let effect = ident_expr(ast, attr.span, "effect");
+                result
+                    .exprs
+                    .push(call_expr(ast, attr.span, effect, [arrow]));
             } else {
-                result.exprs.push(Expr {
-                    code: format!("{}.{} = {}", elem_id, key, expr_str),
-                });
+                result.exprs.push(assign);
             }
         }
     } else if let Some(JSXAttributeValue::StringLiteral(lit)) = &attr.value {
         // Static string - but we still need to set it at runtime for innerHTML
         if key == "innerHTML" {
-            result.exprs.push(Expr {
-                code: format!(
-                    "{}.innerHTML = \"{}\"",
-                    elem_id,
-                    escape_html(&lit.value, false)
-                ),
-            });
+            let elem = ident_expr(ast, attr.span, elem_id);
+            let member = static_member(ast, attr.span, elem, "innerHTML");
+            let Some(target) = expression_to_assignment_target(member) else {
+                return;
+            };
+            let value = ast.expression_string_literal(
+                SPAN,
+                ast.allocator.alloc_str(&escape_html(&lit.value, false)),
+                None,
+            );
+            result.exprs.push(ast.expression_assignment(
+                SPAN,
+                AssignmentOperator::Assign,
+                target,
+                value,
+            ));
         } else {
             // textContent can be inlined in template
             // But the element should have no children then
@@ -679,9 +859,9 @@ fn transform_inner_content<'a>(
 /// Transform element children
 fn transform_children<'a, 'b>(
     element: &JSXElement<'a>,
-    result: &mut TransformResult,
+    result: &mut TransformResult<'a>,
     info: &TransformInfo,
-    context: &BlockContext,
+    context: &BlockContext<'a>,
     options: &TransformOptions<'a>,
     transform_child: ChildTransformer<'a, 'b>,
 ) {
@@ -694,12 +874,17 @@ fn transform_children<'a, 'b>(
         path
     }
 
-    fn child_accessor(parent_id: &str, node_index: usize) -> String {
-        let mut access = format!("{}.firstChild", parent_id);
+    fn child_accessor<'a>(
+        ast: AstBuilder<'a>,
+        span: Span,
+        parent_id: &str,
+        node_index: usize,
+    ) -> Expression<'a> {
+        let mut expr = static_member(ast, span, ident_expr(ast, span, parent_id), "firstChild");
         for _ in 0..node_index {
-            access.push_str(".nextSibling");
+            expr = static_member(ast, span, expr, "nextSibling");
         }
-        access
+        expr
     }
 
     /// Check if children list is a single dynamic expression (no markers needed)
@@ -740,15 +925,16 @@ fn transform_children<'a, 'b>(
 
     fn transform_children_list<'a, 'b>(
         children: &[oxc_ast::ast::JSXChild<'a>],
-        result: &mut TransformResult,
+        result: &mut TransformResult<'a>,
         info: &TransformInfo,
-        context: &BlockContext,
+        context: &BlockContext<'a>,
         options: &TransformOptions<'a>,
         transform_child: ChildTransformer<'a, 'b>,
         node_index: &mut usize,
         last_was_text: &mut bool,
         single_dynamic: bool,
     ) {
+        let ast = context.ast();
         for child in children {
             match child {
                 oxc_ast::ast::JSXChild::Text(text) => {
@@ -779,12 +965,15 @@ fn transform_children<'a, 'b>(
 
                             // Single dynamic child: no marker needed
                             if single_dynamic {
-                                result.exprs.push(Expr {
-                                    code: format!(
-                                        "insert({}, {})",
-                                        parent_id, child_result.exprs[0].code
-                                    ),
-                                });
+                                let callee = ident_expr(ast, child_elem.span, "insert");
+                                let parent = ident_expr(ast, child_elem.span, parent_id);
+                                let child_expr = child_result.exprs[0].clone_in(ast.allocator);
+                                result.exprs.push(call_expr(
+                                    ast,
+                                    child_elem.span,
+                                    callee,
+                                    [parent, child_expr],
+                                ));
                             } else {
                                 result.template.push_str("<!>");
                                 result.template_with_closing_tags.push_str("<!>");
@@ -792,15 +981,24 @@ fn transform_children<'a, 'b>(
                                 let marker_id = context.generate_uid("el$");
                                 result.declarations.push(Declaration {
                                     name: marker_id.clone(),
-                                    init: child_accessor(parent_id, *node_index),
-                                });
-
-                                result.exprs.push(Expr {
-                                    code: format!(
-                                        "insert({}, {}, {})",
-                                        parent_id, child_result.exprs[0].code, marker_id
+                                    init: child_accessor(
+                                        ast,
+                                        child_elem.span,
+                                        parent_id,
+                                        *node_index,
                                     ),
                                 });
+
+                                let callee = ident_expr(ast, child_elem.span, "insert");
+                                let parent = ident_expr(ast, child_elem.span, parent_id);
+                                let child_expr = child_result.exprs[0].clone_in(ast.allocator);
+                                let marker = ident_expr(ast, child_elem.span, &marker_id);
+                                result.exprs.push(call_expr(
+                                    ast,
+                                    child_elem.span,
+                                    callee,
+                                    [parent, child_expr, marker],
+                                ));
 
                                 *node_index += 1;
                             }
@@ -849,18 +1047,26 @@ fn transform_children<'a, 'b>(
                         *last_was_text = false;
                         context.register_helper("insert");
 
-                        let expr_str = expr_to_string(expr);
                         let insert_value = if is_dynamic(expr) {
-                            format!("() => {}", expr_str)
+                            arrow_zero_params_return_expr(
+                                ast,
+                                container.span,
+                                context.clone_expr(expr),
+                            )
                         } else {
-                            expr_str
+                            context.clone_expr(expr)
                         };
 
                         // Single dynamic child: no marker needed
                         if single_dynamic {
-                            result.exprs.push(Expr {
-                                code: format!("insert({}, {})", parent_id, insert_value),
-                            });
+                            let callee = ident_expr(ast, container.span, "insert");
+                            let parent = ident_expr(ast, container.span, parent_id);
+                            result.exprs.push(call_expr(
+                                ast,
+                                container.span,
+                                callee,
+                                [parent, insert_value],
+                            ));
                         } else {
                             result.template.push_str("<!>");
                             result.template_with_closing_tags.push_str("<!>");
@@ -868,15 +1074,18 @@ fn transform_children<'a, 'b>(
                             let marker_id = context.generate_uid("el$");
                             result.declarations.push(Declaration {
                                 name: marker_id.clone(),
-                                init: child_accessor(parent_id, *node_index),
+                                init: child_accessor(ast, container.span, parent_id, *node_index),
                             });
 
-                            result.exprs.push(Expr {
-                                code: format!(
-                                    "insert({}, {}, {})",
-                                    parent_id, insert_value, marker_id
-                                ),
-                            });
+                            let callee = ident_expr(ast, container.span, "insert");
+                            let parent = ident_expr(ast, container.span, parent_id);
+                            let marker = ident_expr(ast, container.span, &marker_id);
+                            result.exprs.push(call_expr(
+                                ast,
+                                container.span,
+                                callee,
+                                [parent, insert_value, marker],
+                            ));
 
                             *node_index += 1;
                         }

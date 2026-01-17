@@ -1,119 +1,118 @@
-//! Template generation
-//! Creates the _tmpl$ declarations and cloneNode calls
+use oxc_allocator::CloneIn;
+use oxc_ast::ast::{AssignmentTarget, Expression};
+use oxc_ast::AstBuilder;
+use oxc_span::Span;
+use oxc_syntax::operator::AssignmentOperator;
 
-use crate::ir::{BlockContext, TransformResult};
-use common::TransformOptions;
+use crate::ir::DynamicBinding;
 
-/// Generate template declaration
-/// _tmpl$ = _template("<div>...</div>")
-pub fn create_template_declaration(
-    index: usize,
-    content: &str,
-    is_svg: bool,
-    context: &BlockContext,
-) -> String {
-    context.register_helper("template");
+fn ident_expr<'a>(ast: AstBuilder<'a>, span: Span, name: &str) -> Expression<'a> {
+    ast.expression_identifier(span, ast.allocator.alloc_str(name))
+}
 
-    if is_svg {
-        format!(
-            "const _tmpl${} = _template(\"<svg>{}</svg>\", true);",
-            index, content
-        )
-    } else {
-        format!("const _tmpl${} = _template(\"{}\");", index, content)
+fn static_member<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    object: Expression<'a>,
+    property: &str,
+) -> Expression<'a> {
+    let prop = ast.identifier_name(span, ast.allocator.alloc_str(property));
+    Expression::StaticMemberExpression(
+        ast.alloc_static_member_expression(span, object, prop, false),
+    )
+}
+
+fn expression_to_assignment_target<'a>(expr: Expression<'a>) -> Option<AssignmentTarget<'a>> {
+    match expr {
+        Expression::Identifier(ident) => Some(AssignmentTarget::AssignmentTargetIdentifier(ident)),
+        Expression::StaticMemberExpression(m) => Some(AssignmentTarget::StaticMemberExpression(m)),
+        Expression::ComputedMemberExpression(m) => {
+            Some(AssignmentTarget::ComputedMemberExpression(m))
+        }
+        Expression::PrivateFieldExpression(m) => Some(AssignmentTarget::PrivateFieldExpression(m)),
+        Expression::TSAsExpression(e) => Some(AssignmentTarget::TSAsExpression(e)),
+        Expression::TSSatisfiesExpression(e) => Some(AssignmentTarget::TSSatisfiesExpression(e)),
+        Expression::TSNonNullExpression(e) => Some(AssignmentTarget::TSNonNullExpression(e)),
+        Expression::TSTypeAssertion(e) => Some(AssignmentTarget::TSTypeAssertion(e)),
+        _ => None,
     }
 }
 
-/// Generate template clone expression
-/// _tmpl$.cloneNode(true)
-pub fn create_template_clone(index: usize) -> String {
-    format!("_tmpl${}.cloneNode(true)", index)
-}
-
-/// Generate the full template creation code from a transform result
-pub fn generate_template_code(
-    result: &TransformResult,
-    context: &BlockContext,
-    _options: &TransformOptions,
-) -> String {
-    let mut code = String::new();
-
-    // If we have a template, create the declaration
-    if !result.template.is_empty() && !result.skip_template {
-        let template_index = context.push_template(result.template.clone(), result.is_svg);
-
-        // Generate variable declarations
-        if let Some(id) = &result.id {
-            code.push_str(&format!(
-                "const {} = {};\n",
-                id,
-                create_template_clone(template_index)
-            ));
-        }
-
-        // Generate walker declarations for child elements
-        for decl in &result.declarations {
-            code.push_str(&format!("const {} = {};\n", decl.name, decl.init));
-        }
-    }
-
-    // Generate effect wrapper for dynamics
-    if !result.dynamics.is_empty() {
-        context.register_helper("effect");
-
-        for binding in &result.dynamics {
-            code.push_str(&format!(
-                "_effect(() => {});\n",
-                generate_set_attr(&binding)
-            ));
-        }
-    }
-
-    // Generate expressions
-    for expr in &result.exprs {
-        code.push_str(&expr.code);
-        code.push_str(";\n");
-    }
-
-    // Generate post expressions
-    for expr in &result.post_exprs {
-        code.push_str(&expr.code);
-        code.push_str(";\n");
-    }
-
-    // Return the element
-    if let Some(id) = &result.id {
-        code.push_str(&format!("return {};\n", id));
-    }
-
-    code
-}
-
-/// Generate attribute setter expression
-pub fn generate_set_attr(binding: &crate::ir::DynamicBinding) -> String {
-    let key = &binding.key;
-    let elem = &binding.elem;
-    let value = &binding.value;
+pub fn generate_set_attr_expr<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    binding: &DynamicBinding<'a>,
+) -> Expression<'a> {
+    let key = binding.key.as_str();
+    let elem = ident_expr(ast, span, &binding.elem);
+    let value = binding.value.clone_in(ast.allocator);
 
     // Handle special cases
     if key == "class" || key == "className" {
         if binding.is_svg {
-            format!("{}.setAttribute(\"class\", {})", elem, value)
-        } else {
-            format!("{}.className = {}", elem, value)
+            let set_attr = static_member(ast, span, elem, "setAttribute");
+            let name = ast.expression_string_literal(span, ast.allocator.alloc_str("class"), None);
+            return ast.expression_call(
+                span,
+                set_attr,
+                None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+                ast.vec_from_array([name.into(), value.into()]),
+                false,
+            );
         }
-    } else if key == "style" {
-        format!("style({}, {})", elem, value)
-    } else if key == "classList" {
-        format!("classList({}, {})", elem, value)
-    } else if key == "textContent" || key == "innerText" {
-        format!("{}.data = {}", elem, value)
-    } else if common::constants::PROPERTIES.contains(key.as_str()) {
-        format!("{}.{} = {}", elem, key, value)
-    } else if binding.is_svg {
-        format!("{}.setAttribute(\"{}\", {})", elem, key, value)
-    } else {
-        // Use setAttribute for unknown attributes
-        format!("{}.setAttribute(\"{}\", {})", elem, key, value)
+
+        let member = static_member(ast, span, elem, "className");
+        if let Some(target) = expression_to_assignment_target(member) {
+            return ast.expression_assignment(span, AssignmentOperator::Assign, target, value);
+        }
+        return ast.expression_identifier(span, "undefined");
     }
+
+    if key == "style" {
+        let callee = ident_expr(ast, span, "style");
+        return ast.expression_call(
+            span,
+            callee,
+            None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+            ast.vec_from_array([elem.into(), value.into()]),
+            false,
+        );
+    }
+
+    if key == "classList" {
+        let callee = ident_expr(ast, span, "classList");
+        return ast.expression_call(
+            span,
+            callee,
+            None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+            ast.vec_from_array([elem.into(), value.into()]),
+            false,
+        );
+    }
+
+    if key == "textContent" || key == "innerText" {
+        let member = static_member(ast, span, elem, "data");
+        if let Some(target) = expression_to_assignment_target(member) {
+            return ast.expression_assignment(span, AssignmentOperator::Assign, target, value);
+        }
+        return ast.expression_identifier(span, "undefined");
+    }
+
+    if common::constants::PROPERTIES.contains(key) {
+        let member = static_member(ast, span, elem, key);
+        if let Some(target) = expression_to_assignment_target(member) {
+            return ast.expression_assignment(span, AssignmentOperator::Assign, target, value);
+        }
+        return ast.expression_identifier(span, "undefined");
+    }
+
+    let set_attr = static_member(ast, span, elem, "setAttribute");
+    let name = ast.expression_string_literal(span, ast.allocator.alloc_str(key), None);
+    ast.expression_call(
+        span,
+        set_attr,
+        None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+        ast.vec_from_array([name.into(), value.into()]),
+        false,
+    )
 }

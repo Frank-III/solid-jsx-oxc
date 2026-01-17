@@ -11,6 +11,7 @@ The following issues have been fixed:
 - ~~SSR Fragment Children~~ - Now recursively processes fragment children
 - ~~SSR Element with Spread~~ - Now builds proper props object and children expression
 - ~~Property Bindings (`prop:`)~~ - Now transforms to direct property assignments
+- ~~SuspenseList Component~~ - No special-case transform required; handled by normal component transform (same as Babel)
 
 ## High Priority
 
@@ -20,11 +21,6 @@ The following issues have been fixed:
 - **DOM**: `crates/dom/src/element.rs:324-349` - wrapped in generic `use()` call
 - **SSR**: `crates/ssr/src/element.rs:128` - skipped entirely (directives are client-only)
 
-### 2. SuspenseList Component
-**Status**: Declared but not implemented
-
-Listed in `BUILT_INS` but no specific transform function. Falls through to generic component handling.
-
 ## Medium Priority
 
 ### 3. Source Maps
@@ -33,16 +29,6 @@ Listed in `BUILT_INS` but no specific transform function. Falls through to gener
 - Validate mappings for DOM/SSR transforms (inserted helpers, templates, wrapped expressions)
 - Provide bundler/plugin guidance for map chaining (Vite/Rollup/esbuild)
 - Add tests that assert map correctness (golden fixtures)
-
-### 4. `@once` Static Marker
-**Location**: `crates/common/src/options.rs:50`
-
-The `static_marker` option exists but is never used. Should skip effect wrapping for `@once` marked expressions.
-
-### 5. Universal Mode (Isomorphic)
-**Location**: `crates/common/src/options.rs:67`
-
-`GenerateMode::Universal` variant exists but no code path uses it.
 
 ### 6. classList Object Binding
 **Status**: Partially implemented, not fully tested
@@ -58,6 +44,18 @@ Hydration keys and markers are generated but comprehensive boundary marking may 
 **Location**: `crates/dom/src/element.rs:346-388`
 
 Only handles simple static object literals. Dynamic computed properties and nested objects are not handled.
+
+## Deferred / Not Planned (for now)
+
+### `@once` Static Marker
+**Status**: Not implemented (deferred)
+
+This requires mapping `Program.comments` onto expressions/attributes by `Span` (OXC doesn’t attach `leadingComments` to nodes like Babel).
+
+### Universal Mode (Isomorphic)
+**Status**: Not implemented (deferred)
+
+Implementing a true Solid “universal” output would require a separate transform pipeline (different runtime helpers + semantics).
 
 ## Low Priority
 
@@ -77,7 +75,7 @@ These differ from the Babel implementation by design:
 
 3. **Complex Expression Parsing**: Expressions are parsed as strings which may lose some AST information
 
-## Test Coverage (56 tests passing)
+## Test Coverage (65 integration tests passing)
 
 Features verified working:
 - [x] Basic element transformation

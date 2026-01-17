@@ -3,15 +3,21 @@
 //! and then generate code in a second pass.
 
 use indexmap::IndexSet;
-use oxc_ast::ast::JSXChild;
+use oxc_allocator::{Allocator, CloneIn};
+use oxc_ast::ast::{Expression, JSXChild};
+use oxc_ast::AstBuilder;
+use oxc_span::Span;
 use std::cell::RefCell;
 
 /// Function type for transforming child JSX elements
-pub type ChildTransformer<'a, 'b> = &'b dyn Fn(&JSXChild<'a>) -> Option<TransformResult>;
+pub type ChildTransformer<'a, 'b> = &'b dyn Fn(&JSXChild<'a>) -> Option<TransformResult<'a>>;
 
 /// The result of transforming a JSX node
 #[derive(Default)]
-pub struct TransformResult {
+pub struct TransformResult<'a> {
+    /// Source span of the originating JSX node
+    pub span: Span,
+
     /// The HTML template string
     pub template: String,
 
@@ -19,16 +25,16 @@ pub struct TransformResult {
     pub template_with_closing_tags: String,
 
     /// Variable declarations needed
-    pub declarations: Vec<Declaration>,
+    pub declarations: Vec<Declaration<'a>>,
 
     /// Expressions to execute (effects, inserts, etc.)
-    pub exprs: Vec<Expr>,
+    pub exprs: Vec<Expression<'a>>,
 
     /// Dynamic attribute bindings
-    pub dynamics: Vec<DynamicBinding>,
+    pub dynamics: Vec<DynamicBinding<'a>>,
 
     /// Post-expressions (run after main effects)
-    pub post_exprs: Vec<Expr>,
+    pub post_exprs: Vec<Expression<'a>>,
 
     /// Whether this is SVG
     pub is_svg: bool,
@@ -52,33 +58,27 @@ pub struct TransformResult {
     pub needs_memo: bool,
 
     /// Individual child codes for fragments (when children need to be in an array)
-    pub child_codes: Vec<String>,
+    pub child_results: Vec<TransformResult<'a>>,
 }
 
 /// A variable declaration
-pub struct Declaration {
+pub struct Declaration<'a> {
     pub name: String,
-    pub init: String,
-}
-
-/// An expression to generate
-pub struct Expr {
-    pub code: String,
+    pub init: Expression<'a>,
 }
 
 /// A dynamic attribute binding that needs effect wrapping
-pub struct DynamicBinding {
+pub struct DynamicBinding<'a> {
     pub elem: String,
     pub key: String,
-    pub value: String,
+    pub value: Expression<'a>,
     pub is_svg: bool,
     pub is_ce: bool,
     pub tag_name: String,
 }
 
 /// Context for the current block being transformed
-#[derive(Default)]
-pub struct BlockContext {
+pub struct BlockContext<'a> {
     /// Current template string being built
     pub template: RefCell<String>,
 
@@ -93,16 +93,26 @@ pub struct BlockContext {
 
     /// Variable counter for unique names
     pub var_counter: RefCell<usize>,
+
+    allocator: &'a Allocator,
 }
 
 pub struct TemplateInfo {
     pub content: String,
     pub is_svg: bool,
+    pub span: Span,
 }
 
-impl BlockContext {
-    pub fn new() -> Self {
-        Self::default()
+impl<'a> BlockContext<'a> {
+    pub fn new(allocator: &'a Allocator) -> Self {
+        Self {
+            template: RefCell::new(String::new()),
+            templates: RefCell::new(Vec::new()),
+            helpers: RefCell::new(IndexSet::new()),
+            delegates: RefCell::new(IndexSet::new()),
+            var_counter: RefCell::new(0),
+            allocator,
+        }
     }
 
     /// Generate a unique variable name
@@ -123,11 +133,23 @@ impl BlockContext {
     }
 
     /// Push a template and return its index
-    pub fn push_template(&self, content: String, is_svg: bool) -> usize {
+    pub fn push_template(&self, content: String, is_svg: bool, span: Span) -> usize {
         self.register_helper("template");
         let mut templates = self.templates.borrow_mut();
         let index = templates.len();
-        templates.push(TemplateInfo { content, is_svg });
+        templates.push(TemplateInfo {
+            content,
+            is_svg,
+            span,
+        });
         index
+    }
+
+    pub fn ast(&self) -> AstBuilder<'a> {
+        AstBuilder::new(self.allocator)
+    }
+
+    pub fn clone_expr(&self, expr: &Expression<'a>) -> Expression<'a> {
+        expr.clone_in(self.allocator)
     }
 }

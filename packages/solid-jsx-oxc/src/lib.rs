@@ -48,6 +48,7 @@ pub struct JsTransformOptions {
     pub module_name: Option<String>,
 
     /// Generate mode: "dom", "ssr", or "universal"
+    /// Note: "universal" is currently treated as "dom" (not a separate universal renderer output).
     /// @default "dom"
     pub generate: Option<String>,
 
@@ -141,8 +142,7 @@ fn transform_internal(source: &str, options: &TransformOptions) -> CodegenReturn
             transformer.transform(&mut program);
         }
         common::GenerateMode::Universal => {
-            // Universal mode generates DOM with SSR fallback markers
-            // For now, use DOM transform
+            // Universal mode is not implemented yet; treat as DOM for now.
             let transformer = SolidTransform::new(&allocator, options_ref);
             transformer.transform(&mut program);
         }
