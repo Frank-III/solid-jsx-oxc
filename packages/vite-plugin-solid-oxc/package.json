@@ -1,6 +1,6 @@
 {
   "name": "vite-plugin-solid-oxc",
-  "version": "0.1.0-alpha.8",
+  "version": "0.1.0-alpha.9",
   "description": "Vite plugin for SolidJS using OXC-based compiler",
   "type": "module",
   "main": "dist/index.js",
