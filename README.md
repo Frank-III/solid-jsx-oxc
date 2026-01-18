@@ -5,9 +5,9 @@ A high-performance JSX compiler for SolidJS built with [OXC](https://oxc.rs/) an
 ## Features
 
 - **Fast** - Built on OXC's Rust-based parser and transformer
-- **Complete** - Full SolidJS JSX support including all directives and special attributes
+- **Comprehensive** - Covers most SolidJS JSX patterns for DOM + SSR builds
 - **Native** - NAPI-RS bindings for seamless Node.js integration
-- **Compatible** - Drop-in replacement for `babel-plugin-jsx-dom-expressions`
+- **Compatible** - Aims to be a drop-in replacement for `babel-plugin-jsx-dom-expressions` in common setups (see `packages/solid-jsx-oxc/TODO.md` for gaps/deferrals)
 
 ## Installation
 
@@ -85,13 +85,15 @@ export default {
 import { transform } from 'solid-jsx-oxc';
 
 const result = transform(code, {
-  mode: 'dom', // or 'ssr'
+  generate: 'dom', // 'dom' | 'ssr' | 'universal' (currently aliases 'dom')
+  filename: 'input.jsx',
   moduleName: 'solid-js/web',
-  builtIns: ['For', 'Show', 'Switch', 'Match', 'Suspense', 'ErrorBoundary', 'Portal', 'Dynamic'],
+  builtIns: ['For', 'Show', 'Switch', 'Match', 'Suspense', 'SuspenseList', 'ErrorBoundary', 'Portal', 'Index', 'Dynamic'],
   delegateEvents: true,
   wrapConditionals: true,
-  contextToCustomElements: false,
-  generate: 'dom', // or 'ssr'
+  contextToCustomElements: true,
+  hydratable: false,
+  sourceMap: false,
 });
 
 console.log(result.code);
@@ -108,15 +110,17 @@ console.log(result.code);
 | Capture events (`onClickCapture`) | ✅ |
 | `prop:` prefix | ✅ |
 | `attr:` prefix | ✅ |
-| `classList` object | ✅ |
+| `classList` object | ⚠️ (complex cases need more coverage) |
 | `style` object | ✅ |
 | Refs (variable & callback) | ✅ |
 | Spread props | ✅ |
 | Built-in components (`For`, `Show`, etc.) | ✅ |
-| Directives (`use:`) | ✅ |
+| Directives (`use:`) | ✅ (DOM) / ⚠️ (SSR skipped) |
 | SVG elements | ✅ |
 | Fragments | ✅ |
 | SSR mode | ✅ |
+| `@once` static marker | ❌ |
+| Universal mode (`generate: "universal"`) | ⚠️ (currently aliases DOM) |
 
 ## Packages
 

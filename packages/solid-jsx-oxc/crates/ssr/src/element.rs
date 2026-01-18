@@ -4,12 +4,13 @@
 //! Unlike DOM, we don't create DOM nodes - we build strings.
 
 use oxc_ast::ast::{
-    JSXAttribute, JSXAttributeItem, JSXAttributeName, JSXAttributeValue, JSXElement,
+    Argument, ArrayExpressionElement, Expression, JSXAttribute, JSXAttributeItem, JSXAttributeName,
+    JSXAttributeValue, JSXElement, PropertyKey, PropertyKind,
 };
+use oxc_span::SPAN;
 
 use common::{
     constants::{ALIASES, CHILD_PROPERTIES, PROPERTIES, VOID_ELEMENTS},
-    expr_to_string,
     expression::escape_html,
     get_attr_name, is_svg_element, TransformOptions,
 };
@@ -20,13 +21,15 @@ use crate::ir::{SSRContext, SSRResult};
 pub fn transform_element<'a>(
     element: &JSXElement<'a>,
     tag_name: &str,
-    context: &SSRContext,
+    context: &SSRContext<'a>,
     options: &TransformOptions<'a>,
-) -> SSRResult {
+) -> SSRResult<'a> {
     let is_void = VOID_ELEMENTS.contains(tag_name);
     let is_script_or_style = tag_name == "script" || tag_name == "style";
+    let ast = context.ast();
 
     let mut result = SSRResult::new();
+    result.span = element.span;
     result.tag_name = Some(tag_name.to_string());
     result.skip_escape = is_script_or_style;
 
@@ -47,7 +50,15 @@ pub fn transform_element<'a>(
     // Add hydration key if needed
     if context.hydratable && options.hydratable {
         context.register_helper("ssrHydrationKey");
-        result.push_dynamic("ssrHydrationKey()".to_string(), false, true);
+        let callee = ast.expression_identifier(SPAN, "ssrHydrationKey");
+        let expr = ast.expression_call(
+            SPAN,
+            callee,
+            None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+            ast.vec(),
+            false,
+        );
+        result.push_dynamic(expr, false, true);
     }
 
     // Transform attributes
@@ -69,23 +80,29 @@ pub fn transform_element<'a>(
 fn transform_element_with_spread<'a>(
     element: &JSXElement<'a>,
     tag_name: &str,
-    context: &SSRContext,
+    context: &SSRContext<'a>,
     options: &TransformOptions<'a>,
-) -> SSRResult {
+) -> SSRResult<'a> {
     context.register_helper("ssrElement");
     context.register_helper("escape");
+    let ast = context.ast();
+    let span = SPAN;
 
     let mut result = SSRResult::new();
+    result.span = element.span;
     result.has_spread = true;
 
     // Build props object - merge spreads with regular attributes
-    let mut props_parts: Vec<String> = vec![];
     let is_svg = is_svg_element(tag_name);
+    let mut props = ast.vec();
 
     for attr in &element.opening_element.attributes {
         match attr {
             JSXAttributeItem::SpreadAttribute(spread) => {
-                props_parts.push(format!("...{}", expr_to_string(&spread.argument)));
+                props.push(ast.object_property_kind_spread_property(
+                    span,
+                    context.clone_expr(&spread.argument),
+                ));
             }
             JSXAttributeItem::Attribute(attr) => {
                 let key = get_attr_name(&attr.name);
@@ -110,23 +127,60 @@ fn transform_element_with_spread<'a>(
 
                 match &attr.value {
                     Some(JSXAttributeValue::StringLiteral(lit)) => {
-                        props_parts.push(format!(
-                            "\"{}\": \"{}\"",
-                            attr_name,
-                            escape_html(&lit.value, true)
+                        let key = PropertyKey::StringLiteral(ast.alloc_string_literal(
+                            span,
+                            ast.allocator.alloc_str(&attr_name),
+                            None,
+                        ));
+                        let value = ast.expression_string_literal(
+                            span,
+                            ast.allocator.alloc_str(&escape_html(&lit.value, true)),
+                            None,
+                        );
+                        props.push(ast.object_property_kind_object_property(
+                            span,
+                            PropertyKind::Init,
+                            key,
+                            value,
+                            false,
+                            false,
+                            false,
                         ));
                     }
                     Some(JSXAttributeValue::ExpressionContainer(container)) => {
                         if let Some(expr) = container.expression.as_expression() {
-                            props_parts.push(format!(
-                                "\"{}\": {}",
-                                attr_name,
-                                expr_to_string(expr)
+                            let key = PropertyKey::StringLiteral(ast.alloc_string_literal(
+                                span,
+                                ast.allocator.alloc_str(&attr_name),
+                                None,
+                            ));
+                            props.push(ast.object_property_kind_object_property(
+                                span,
+                                PropertyKind::Init,
+                                key,
+                                context.clone_expr(expr),
+                                false,
+                                false,
+                                false,
                             ));
                         }
                     }
                     None => {
-                        props_parts.push(format!("\"{}\": true", attr_name));
+                        let key = PropertyKey::StringLiteral(ast.alloc_string_literal(
+                            span,
+                            ast.allocator.alloc_str(&attr_name),
+                            None,
+                        ));
+                        let value = ast.expression_boolean_literal(span, true);
+                        props.push(ast.object_property_kind_object_property(
+                            span,
+                            PropertyKind::Init,
+                            key,
+                            value,
+                            false,
+                            false,
+                            false,
+                        ));
                     }
                     _ => {}
                 }
@@ -134,29 +188,37 @@ fn transform_element_with_spread<'a>(
         }
     }
 
-    let props_str = if props_parts.is_empty() {
-        "{}".to_string()
-    } else {
-        format!("{{ {} }}", props_parts.join(", "))
-    };
+    let props_expr = ast.expression_object(span, props);
 
     // Build children
-    let children_str = if element.children.is_empty() {
-        "null".to_string()
+    let children_expr = if element.children.is_empty() {
+        ast.expression_null_literal(span)
     } else {
-        let mut children: Vec<String> = vec![];
+        let mut children: Vec<Expression<'a>> = Vec::new();
         for child in &element.children {
             match child {
                 oxc_ast::ast::JSXChild::Text(text) => {
                     let content = common::expression::trim_whitespace(&text.value);
                     if !content.is_empty() {
-                        children.push(format!("\"{}\"", escape_html(&content, false)));
+                        children.push(ast.expression_string_literal(
+                            span,
+                            ast.allocator.alloc_str(&escape_html(&content, false)),
+                            None,
+                        ));
                     }
                 }
                 oxc_ast::ast::JSXChild::ExpressionContainer(container) => {
                     if let Some(expr) = container.expression.as_expression() {
-                        context.register_helper("escape");
-                        children.push(format!("escape({})", expr_to_string(expr)));
+                        let callee = ast.expression_identifier(span, "escape");
+                        let mut args = ast.vec();
+                        args.push(Argument::from(context.clone_expr(expr)));
+                        children.push(ast.expression_call(
+                            span,
+                            callee,
+                            None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+                            args,
+                            false,
+                        ));
                     }
                 }
                 oxc_ast::ast::JSXChild::Element(child_elem) => {
@@ -165,17 +227,38 @@ fn transform_element_with_spread<'a>(
                     let child_result = if common::is_component(&child_tag) {
                         // Component - use component transformer
                         let child_transformer =
-                            |child: &oxc_ast::ast::JSXChild<'a>| -> Option<SSRResult> {
+                            |child: &oxc_ast::ast::JSXChild<'a>| -> Option<SSRResult<'a>> {
                                 match child {
                                     oxc_ast::ast::JSXChild::Element(el) => {
                                         let tag = common::get_tag_name(el);
                                         Some(if common::is_component(&tag) {
+                                            // For deeply nested components, use simple fallback
+                                            context.register_helper("createComponent");
+                                            context.register_helper("escape");
+
                                             let mut r = SSRResult::new();
-                                            r.push_dynamic(
-                                                format!("createComponent({}, {{}})", tag),
-                                                false,
+                                            r.span = el.span;
+                                            let callee =
+                                                ast.expression_identifier(span, "createComponent");
+                                            let mut args = ast.vec();
+                                            let tag_expr = ast.expression_identifier(
+                                                span,
+                                                ast.allocator.alloc_str(&tag),
+                                            );
+                                            args.push(Argument::from(tag_expr));
+                                            args.push(Argument::from(
+                                                ast.expression_object(span, ast.vec()),
+                                            ));
+                                            let call = ast.expression_call(
+                                                span,
+                                                callee,
+                                                None::<
+                                                    oxc_ast::ast::TSTypeParameterInstantiation<'a>,
+                                                >,
+                                                args,
                                                 false,
                                             );
+                                            r.push_dynamic(call, false, false);
                                             r
                                         } else {
                                             transform_element(el, &tag, context, options)
@@ -194,32 +277,50 @@ fn transform_element_with_spread<'a>(
                     } else {
                         transform_element(child_elem, &child_tag, context, options)
                     };
-                    children.push(child_result.to_ssr_call_with_hydration(context.hydratable));
+
+                    children.push(child_result.to_ssr_expression(ast, context.hydratable));
                 }
                 _ => {}
             }
         }
+
         if children.len() == 1 {
-            children.pop().unwrap_or("null".to_string())
+            children
+                .pop()
+                .unwrap_or_else(|| ast.expression_null_literal(span))
         } else if children.is_empty() {
-            "null".to_string()
+            ast.expression_null_literal(span)
         } else {
-            format!("[{}]", children.join(", "))
+            let mut elements = ast.vec_with_capacity(children.len());
+            for expr in children {
+                elements.push(ArrayExpressionElement::from(expr));
+            }
+            ast.expression_array(span, elements)
         }
     };
 
     // For spread, we generate: ssrElement("tag", props, children, needsHydrationKey)
-    result.push_dynamic(
-        format!(
-            "ssrElement(\"{}\", {}, {}, {})",
-            tag_name,
-            props_str,
-            children_str,
-            context.hydratable && options.hydratable
-        ),
+    let callee = ast.expression_identifier(span, "ssrElement");
+    let mut args = ast.vec();
+    args.push(Argument::from(ast.expression_string_literal(
+        span,
+        ast.allocator.alloc_str(tag_name),
+        None,
+    )));
+    args.push(Argument::from(props_expr));
+    args.push(Argument::from(children_expr));
+    args.push(Argument::from(ast.expression_boolean_literal(
+        span,
+        context.hydratable && options.hydratable,
+    )));
+    let call = ast.expression_call(
+        span,
+        callee,
+        None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+        args,
         false,
-        true,
     );
+    result.push_dynamic(call, false, true);
 
     result
 }
@@ -227,8 +328,8 @@ fn transform_element_with_spread<'a>(
 /// Transform element attributes for SSR
 fn transform_attributes<'a>(
     element: &JSXElement<'a>,
-    result: &mut SSRResult,
-    context: &SSRContext,
+    result: &mut SSRResult<'a>,
+    context: &SSRContext<'a>,
     options: &TransformOptions<'a>,
 ) {
     let tag_name = result.tag_name.as_deref().unwrap_or("");
@@ -244,11 +345,12 @@ fn transform_attributes<'a>(
 /// Transform a single attribute for SSR
 fn transform_attribute<'a>(
     attr: &JSXAttribute<'a>,
-    result: &mut SSRResult,
-    context: &SSRContext,
+    result: &mut SSRResult<'a>,
+    context: &SSRContext<'a>,
     _options: &TransformOptions<'a>,
     is_svg: bool,
 ) {
+    let ast = context.ast();
     let key = get_attr_name(&attr.name);
 
     // Skip client-only attributes
@@ -284,36 +386,78 @@ fn transform_attribute<'a>(
         // Dynamic value
         Some(JSXAttributeValue::ExpressionContainer(container)) => {
             if let Some(expr) = container.expression.as_expression() {
-                let expr_str = expr_to_string(expr);
-                context.register_helper("escape");
+                let expr = context.clone_expr(expr);
 
                 // Handle special attributes
                 if key == "style" {
                     context.register_helper("ssrStyle");
                     result.push_static(&format!(" {}=\"", attr_name));
-                    result.push_dynamic(format!("ssrStyle({})", expr_str), false, true);
+                    let callee = ast.expression_identifier(SPAN, "ssrStyle");
+                    let mut args = ast.vec();
+                    args.push(Argument::from(expr));
+                    result.push_dynamic(
+                        ast.expression_call(
+                            SPAN,
+                            callee,
+                            None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+                            args,
+                            false,
+                        ),
+                        false,
+                        true,
+                    );
                     result.push_static("\"");
                 } else if key == "class" || key == "className" {
+                    context.register_helper("escape");
                     result.push_static(&format!(" {}=\"", attr_name));
-                    result.push_dynamic(expr_str, true, false);
+                    result.push_dynamic(expr, true, false);
                     result.push_static("\"");
                 } else if key == "classList" {
                     context.register_helper("ssrClassList");
                     result.push_static(" class=\"");
-                    result.push_dynamic(format!("ssrClassList({})", expr_str), false, true);
+                    let callee = ast.expression_identifier(SPAN, "ssrClassList");
+                    let mut args = ast.vec();
+                    args.push(Argument::from(expr));
+                    result.push_dynamic(
+                        ast.expression_call(
+                            SPAN,
+                            callee,
+                            None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+                            args,
+                            false,
+                        ),
+                        false,
+                        true,
+                    );
                     result.push_static("\"");
                 } else if PROPERTIES.contains(key.as_str()) {
                     // Boolean attributes
                     context.register_helper("ssrAttribute");
+                    let callee = ast.expression_identifier(SPAN, "ssrAttribute");
+                    let mut args = ast.vec();
+                    args.push(Argument::from(ast.expression_string_literal(
+                        SPAN,
+                        ast.allocator.alloc_str(&attr_name),
+                        None,
+                    )));
+                    args.push(Argument::from(expr));
+                    args.push(Argument::from(ast.expression_boolean_literal(SPAN, true)));
                     result.push_dynamic(
-                        format!("ssrAttribute(\"{}\", {}, true)", attr_name, expr_str),
+                        ast.expression_call(
+                            SPAN,
+                            callee,
+                            None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+                            args,
+                            false,
+                        ),
                         false,
                         true,
                     );
                 } else {
                     // Regular attribute
+                    context.register_helper("escape");
                     result.push_static(&format!(" {}=\"", attr_name));
-                    result.push_dynamic(expr_str, true, false);
+                    result.push_dynamic(expr, true, false);
                     result.push_static("\"");
                 }
             }
@@ -331,8 +475,8 @@ fn transform_attribute<'a>(
 /// Transform element children for SSR
 fn transform_children<'a>(
     element: &JSXElement<'a>,
-    result: &mut SSRResult,
-    context: &SSRContext,
+    result: &mut SSRResult<'a>,
+    context: &SSRContext<'a>,
     options: &TransformOptions<'a>,
 ) {
     // Check for innerHTML/textContent in attributes first
@@ -347,7 +491,7 @@ fn transform_children<'a>(
                 if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
                     if let Some(expr) = container.expression.as_expression() {
                         // innerHTML - don't escape
-                        result.push_dynamic(expr_to_string(expr), false, true);
+                        result.push_dynamic(context.clone_expr(expr), false, true);
                         return;
                     }
                 }
@@ -355,7 +499,7 @@ fn transform_children<'a>(
                 if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
                     if let Some(expr) = container.expression.as_expression() {
                         context.register_helper("escape");
-                        result.push_dynamic(expr_to_string(expr), false, false);
+                        result.push_dynamic(context.clone_expr(expr), false, false);
                         return;
                     }
                 }
@@ -372,11 +516,12 @@ fn transform_children<'a>(
 /// This is extracted as a helper to enable recursive processing of fragment children.
 fn process_jsx_children<'a>(
     children: &oxc_allocator::Vec<'a, oxc_ast::ast::JSXChild<'a>>,
-    result: &mut SSRResult,
+    result: &mut SSRResult<'a>,
     skip_escape: bool,
-    context: &SSRContext,
+    context: &SSRContext<'a>,
     options: &TransformOptions<'a>,
 ) {
+    let ast = context.ast();
     for child in children {
         match child {
             oxc_ast::ast::JSXChild::Text(text) => {
@@ -395,18 +540,35 @@ fn process_jsx_children<'a>(
                 let child_result = if common::is_component(&child_tag) {
                     // Create a child transformer for nested components
                     let child_transformer =
-                        |child: &oxc_ast::ast::JSXChild<'a>| -> Option<SSRResult> {
+                        |child: &oxc_ast::ast::JSXChild<'a>| -> Option<SSRResult<'a>> {
                             match child {
                                 oxc_ast::ast::JSXChild::Element(el) => {
                                     let tag = common::get_tag_name(el);
                                     Some(if common::is_component(&tag) {
                                         // For deeply nested components, use simple fallback
+                                        context.register_helper("createComponent");
+                                        context.register_helper("escape");
                                         let mut r = SSRResult::new();
-                                        r.push_dynamic(
-                                            format!("createComponent({}, {{}})", tag),
-                                            false,
+                                        r.span = el.span;
+                                        let callee =
+                                            ast.expression_identifier(SPAN, "createComponent");
+                                        let mut args = ast.vec();
+                                        let tag_expr = ast.expression_identifier(
+                                            SPAN,
+                                            ast.allocator.alloc_str(&tag),
+                                        );
+                                        args.push(Argument::from(tag_expr));
+                                        args.push(Argument::from(
+                                            ast.expression_object(SPAN, ast.vec()),
+                                        ));
+                                        let call = ast.expression_call(
+                                            SPAN,
+                                            callee,
+                                            None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+                                            args,
                                             false,
                                         );
+                                        r.push_dynamic(call, false, false);
                                         r
                                     } else {
                                         transform_element(el, &tag, context, options)
@@ -430,15 +592,15 @@ fn process_jsx_children<'a>(
 
             oxc_ast::ast::JSXChild::ExpressionContainer(container) => {
                 if let Some(expr) = container.expression.as_expression() {
-                    let expr_str = expr_to_string(expr);
-                    context.register_helper("escape");
+                    let expr = context.clone_expr(expr);
 
                     if skip_escape {
                         // Inside script/style - don't escape
-                        result.push_dynamic(expr_str, false, true);
+                        result.push_dynamic(expr, false, true);
                     } else {
                         // Normal content - escape
-                        result.push_dynamic(expr_str, false, false);
+                        context.register_helper("escape");
+                        result.push_dynamic(expr, false, false);
                     }
                 }
             }

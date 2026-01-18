@@ -150,8 +150,16 @@ fn test_dom_mixed_children() {
 fn test_dom_mixed_text_inserts_before_marker() {
     let code = transform_dom(r#"<div>Hello {name()}!</div>"#);
     // Whitespace is preserved: "Hello " keeps trailing space
-    assert!(code.contains("<div>Hello <!>!</div>"), "Template should preserve space before marker, got: {}", code);
-    assert!(code.contains("insert(_el$1, () => name(), _el$2)"), "Should insert with marker, got: {}", code);
+    assert!(
+        code.contains("<div>Hello <!>!</div>"),
+        "Template should preserve space before marker, got: {}",
+        code
+    );
+    assert!(
+        code.contains("insert(_el$1, () => name(), _el$2)"),
+        "Should insert with marker, got: {}",
+        code
+    );
 }
 
 #[test]
@@ -429,7 +437,7 @@ fn test_dom_for() {
     let code = transform_dom(r#"<For each={items}>{item => <div>{item}</div>}</For>"#);
     assert!(code.contains("createComponent"));
     assert!(code.contains("For"));
-    assert!(code.contains("each:"));
+    assert!(code.contains("get each()"));
     assert!(code.contains("items"));
 }
 
@@ -438,7 +446,7 @@ fn test_dom_show() {
     let code = transform_dom(r#"<Show when={visible}><div>shown</div></Show>"#);
     assert!(code.contains("createComponent"));
     assert!(code.contains("Show"));
-    assert!(code.contains("when:"));
+    assert!(code.contains("get when()"));
     assert!(code.contains("visible"));
     assert!(
         code.contains("cloneNode(true)"),
@@ -452,7 +460,7 @@ fn test_dom_show_with_fallback() {
         r#"<Show when={visible} fallback={<div>hidden</div>}><div>shown</div></Show>"#,
     );
     assert!(code.contains("Show"));
-    assert!(code.contains("fallback:"));
+    assert!(code.contains("get fallback()"));
     assert!(
         code.contains("cloneNode(true)"),
         "Show fallback/children JSX should be transformed"
@@ -461,7 +469,8 @@ fn test_dom_show_with_fallback() {
 
 #[test]
 fn test_dom_show_with_event_child() {
-    let code = transform_dom(r#"<Show when={visible}><button onClick={handler}>ok</button></Show>"#);
+    let code =
+        transform_dom(r#"<Show when={visible}><button onClick={handler}>ok</button></Show>"#);
     assert!(code.contains("Show"));
     assert!(
         code.contains("$$click"),
@@ -485,7 +494,7 @@ fn test_dom_switch_match() {
 fn test_dom_index() {
     let code = transform_dom(r#"<Index each={items}>{(item, i) => <div>{i()}</div>}</Index>"#);
     assert!(code.contains("Index"));
-    assert!(code.contains("each:"));
+    assert!(code.contains("get each()"));
 }
 
 #[test]
@@ -493,7 +502,7 @@ fn test_dom_suspense() {
     let code =
         transform_dom(r#"<Suspense fallback={<div>Loading...</div>}><Content /></Suspense>"#);
     assert!(code.contains("Suspense"));
-    assert!(code.contains("fallback:"));
+    assert!(code.contains("get fallback()"));
 }
 
 #[test]
@@ -542,7 +551,7 @@ fn test_ssr_component() {
 fn test_ssr_for() {
     let code = transform_ssr(r#"<For each={items}>{item => <li>{item}</li>}</For>"#);
     assert!(code.contains("For"));
-    assert!(code.contains("each:"));
+    assert!(code.contains("get each()"));
 }
 
 // ============================================================================
@@ -673,24 +682,45 @@ fn test_dom_nested_dynamic_content() {
     let code = transform_dom(r#"<div><span>{x()}</span></div>"#);
 
     // Template should have span without marker (single dynamic child optimization)
-    assert!(code.contains("<span></span>"), "Template should have empty span (no marker for single dynamic child), got: {}", code);
+    assert!(
+        code.contains("<span></span>"),
+        "Template should have empty span (no marker for single dynamic child), got: {}",
+        code
+    );
 
     // Should walk to span element
-    assert!(code.contains("firstChild"), "Should walk to span with firstChild, got: {}", code);
+    assert!(
+        code.contains("firstChild"),
+        "Should walk to span with firstChild, got: {}",
+        code
+    );
 
     // Should insert into span without marker argument
-    assert!(code.contains("insert("), "Should have insert() call, got: {}", code);
+    assert!(
+        code.contains("insert("),
+        "Should have insert() call, got: {}",
+        code
+    );
     assert!(code.contains("x()"), "Should reference x(), got: {}", code);
 }
 
 #[test]
 fn test_dom_two_siblings_with_events() {
     // Bug: second button should use firstChild.nextSibling not root.nextSibling
-    let code = transform_dom(r#"<div><button onClick={() => 1}>A</button><button onClick={() => 2}>B</button></div>"#);
+    let code = transform_dom(
+        r#"<div><button onClick={() => 1}>A</button><button onClick={() => 2}>B</button></div>"#,
+    );
 
     // Should have proper sibling traversal
-    assert!(code.contains("firstChild"), "Should walk to first button, got: {}", code);
+    assert!(
+        code.contains("firstChild"),
+        "Should walk to first button, got: {}",
+        code
+    );
     // Second button should chain from first: firstChild.nextSibling
-    assert!(code.contains("firstChild.nextSibling"),
-        "Should walk to second button via firstChild.nextSibling, got: {}", code);
+    assert!(
+        code.contains("firstChild.nextSibling"),
+        "Should walk to second button via firstChild.nextSibling, got: {}",
+        code
+    );
 }

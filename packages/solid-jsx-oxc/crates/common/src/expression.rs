@@ -83,7 +83,17 @@ pub fn trim_whitespace(text: &str) -> String {
 
     for c in text.chars() {
         if c.is_whitespace() {
-            if !prev_was_space && !result.is_empty() {
+            if has_newline {
+                // Ignore leading indentation/newlines; we'll trim later.
+                if !prev_was_space && !result.is_empty() {
+                    result.push(' ');
+                    prev_was_space = true;
+                }
+                continue;
+            }
+
+            // Inline text: preserve a single leading space (e.g., " Click" after an element)
+            if !prev_was_space {
                 result.push(' ');
                 prev_was_space = true;
             }

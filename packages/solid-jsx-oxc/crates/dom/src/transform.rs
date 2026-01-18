@@ -1,38 +1,29 @@
 //! Main JSX transform logic
 //! This implements the Traverse trait to walk the AST and transform JSX
 
-use oxc_allocator::{Allocator, CloneIn};
+use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Expression, ImportDeclarationSpecifier, ImportOrExportKind, JSXChild, JSXElement,
-    JSXExpressionContainer, JSXFragment, JSXText, ModuleExportName, Program, Statement,
+    Argument, ArrayExpressionElement, Expression, ImportDeclarationSpecifier, ImportOrExportKind,
+    JSXChild, JSXElement, JSXExpressionContainer, JSXFragment, JSXText, ModuleExportName, Program,
+    Statement, TemplateElementValue, VariableDeclarationKind,
 };
-use oxc_ast_visit::VisitMut;
-use oxc_parser::Parser;
+use oxc_ast::NONE;
 use oxc_semantic::SemanticBuilder;
-use oxc_span::{SourceType, Span, SPAN};
+use oxc_span::SPAN;
 use oxc_traverse::{traverse_mut, Traverse, TraverseCtx};
 
-use common::{expr_to_string, get_tag_name, is_component, TransformOptions};
+use common::{get_tag_name, is_component, TransformOptions};
 
 use crate::component::transform_component;
 use crate::element::transform_element;
 use crate::ir::{BlockContext, TransformResult};
-
-struct SpanResetVisitor {
-    span: Span,
-}
-
-impl<'a> VisitMut<'a> for SpanResetVisitor {
-    fn visit_span(&mut self, it: &mut Span) {
-        *it = self.span;
-    }
-}
+use crate::output::build_dom_output_expr;
 
 /// The main Solid JSX transformer
 pub struct SolidTransform<'a> {
     allocator: &'a Allocator,
     options: &'a TransformOptions<'a>,
-    context: BlockContext,
+    context: BlockContext<'a>,
 }
 
 impl<'a> SolidTransform<'a> {
@@ -40,7 +31,7 @@ impl<'a> SolidTransform<'a> {
         Self {
             allocator,
             options,
-            context: BlockContext::new(),
+            context: BlockContext::new(allocator),
         }
     }
 
@@ -67,7 +58,11 @@ impl<'a> SolidTransform<'a> {
     }
 
     /// Transform a JSX node and return the result
-    fn transform_node(&self, node: &JSXChild<'a>, info: &TransformInfo) -> Option<TransformResult> {
+    fn transform_node(
+        &self,
+        node: &JSXChild<'a>,
+        info: &TransformInfo,
+    ) -> Option<TransformResult<'a>> {
         match node {
             JSXChild::Element(element) => Some(self.transform_jsx_element(element, info)),
             JSXChild::Fragment(fragment) => Some(self.transform_fragment(fragment, info)),
@@ -75,12 +70,16 @@ impl<'a> SolidTransform<'a> {
             JSXChild::ExpressionContainer(container) => {
                 self.transform_expression_container(container, info)
             }
-            JSXChild::Spread(_spread) => {
+            JSXChild::Spread(spread) => {
                 // Spread children are rare, treat as dynamic
+                let expr = self.context.ast().expression_string_literal(
+                    SPAN,
+                    self.context.ast().allocator.alloc_str("/* spread child */"),
+                    None,
+                );
                 Some(TransformResult {
-                    exprs: vec![crate::ir::Expr {
-                        code: format!("/* spread child */"),
-                    }],
+                    span: spread.span,
+                    exprs: vec![expr],
                     ..Default::default()
                 })
             }
@@ -92,12 +91,13 @@ impl<'a> SolidTransform<'a> {
         &self,
         element: &JSXElement<'a>,
         info: &TransformInfo,
-    ) -> TransformResult {
+    ) -> TransformResult<'a> {
         let tag_name = get_tag_name(element);
 
         // Create child transformer closure that can recursively transform children
-        let child_transformer =
-            |child: &JSXChild<'a>| -> Option<TransformResult> { self.transform_node(child, info) };
+        let child_transformer = |child: &JSXChild<'a>| -> Option<TransformResult<'a>> {
+            self.transform_node(child, info)
+        };
 
         if is_component(&tag_name) {
             transform_component(
@@ -124,10 +124,13 @@ impl<'a> SolidTransform<'a> {
         &self,
         fragment: &JSXFragment<'a>,
         info: &TransformInfo,
-    ) -> TransformResult {
-        let mut result = TransformResult::default();
+    ) -> TransformResult<'a> {
+        let mut result = TransformResult {
+            span: fragment.span,
+            ..Default::default()
+        };
         let mut has_expression_child = false;
-        let mut child_results: Vec<TransformResult> = Vec::new();
+        let mut child_results: Vec<TransformResult<'a>> = Vec::new();
 
         for child in &fragment.children {
             // Track if we have expression container children (need memo)
@@ -149,7 +152,10 @@ impl<'a> SolidTransform<'a> {
         if child_results.len() == 1 {
             let mut single_result = child_results.pop().unwrap();
             // For single expression child, check if we need memo
-            if single_result.template.is_empty() && !single_result.exprs.is_empty() && has_expression_child {
+            if single_result.template.is_empty()
+                && !single_result.exprs.is_empty()
+                && has_expression_child
+            {
                 single_result.needs_memo = true;
             }
             return single_result;
@@ -157,8 +163,12 @@ impl<'a> SolidTransform<'a> {
 
         // Multiple children - check if we need array output
         let has_text_child = child_results.iter().any(|r| r.text);
-        let has_element_child = child_results.iter().any(|r| !r.template.is_empty() && !r.text);
-        let has_component_child = child_results.iter().any(|r| r.template.is_empty() && !r.exprs.is_empty());
+        let has_element_child = child_results
+            .iter()
+            .any(|r| !r.template.is_empty() && !r.text);
+        let has_component_child = child_results
+            .iter()
+            .any(|r| r.template.is_empty() && !r.exprs.is_empty());
 
         // Use array output when mixing different types of children
         let needs_array = (has_text_child && has_element_child)
@@ -168,18 +178,7 @@ impl<'a> SolidTransform<'a> {
 
         if needs_array {
             // Mixed children: need array output
-            // Generate code for each child independently
-            for child_result in &child_results {
-                if child_result.text {
-                    // Text children become string literals
-                    result.child_codes.push(format!("\"{}\"", child_result.template));
-                } else {
-                    let code = self.build_dom_output(child_result);
-                    if !code.is_empty() {
-                        result.child_codes.push(code);
-                    }
-                }
-            }
+            result.child_results = child_results;
         } else if has_element_child {
             // All native element children - merge templates
             for child_result in child_results {
@@ -209,13 +208,14 @@ impl<'a> SolidTransform<'a> {
     }
 
     /// Transform JSX text
-    fn transform_text(&self, text: &JSXText<'a>) -> Option<TransformResult> {
+    fn transform_text(&self, text: &JSXText<'a>) -> Option<TransformResult<'a>> {
         let content = common::expression::trim_whitespace(&text.value);
         if content.is_empty() {
             return None;
         }
 
         Some(TransformResult {
+            span: text.span,
             template: common::expression::escape_html(&content, false),
             text: true,
             ..Default::default()
@@ -227,22 +227,36 @@ impl<'a> SolidTransform<'a> {
         &self,
         container: &JSXExpressionContainer<'a>,
         _info: &TransformInfo,
-    ) -> Option<TransformResult> {
+    ) -> Option<TransformResult<'a>> {
         // Use as_expression() to get the expression if it exists
         if let Some(expr) = container.expression.as_expression() {
-            let expr_str = expr_to_string(expr);
             if common::is_dynamic(expr) {
                 // Wrap in arrow function for reactivity
+                let ast = self.context.ast();
+                let span = SPAN;
+                let params = ast.alloc_formal_parameters(
+                    span,
+                    oxc_ast::ast::FormalParameterKind::ArrowFormalParameters,
+                    ast.vec(),
+                    NONE,
+                );
+                let mut statements = ast.vec_with_capacity(1);
+                statements.push(Statement::ExpressionStatement(
+                    ast.alloc_expression_statement(span, self.context.clone_expr(expr)),
+                ));
+                let body = ast.alloc_function_body(span, ast.vec(), statements);
+                let arrow =
+                    ast.expression_arrow_function(span, true, false, NONE, params, NONE, body);
                 Some(TransformResult {
-                    exprs: vec![crate::ir::Expr {
-                        code: format!("() => {}", expr_str),
-                    }],
+                    span: container.span,
+                    exprs: vec![arrow],
                     ..Default::default()
                 })
             } else {
                 // Static expression
                 Some(TransformResult {
-                    exprs: vec![crate::ir::Expr { code: expr_str }],
+                    span: container.span,
+                    exprs: vec![self.context.clone_expr(expr)],
                     ..Default::default()
                 })
             }
@@ -250,91 +264,6 @@ impl<'a> SolidTransform<'a> {
             // Empty expression
             None
         }
-    }
-
-    /// Build DOM output code from transform result
-    fn build_dom_output(&self, result: &TransformResult) -> String {
-        let mut code = String::new();
-
-        // Handle fragment with mixed children (array output)
-        if !result.child_codes.is_empty() {
-            code = format!("[{}]", result.child_codes.join(", "));
-            return code;
-        }
-
-        // Handle text-only result - just return the string literal
-        if result.text && !result.template.is_empty() {
-            // The template already contains escaped HTML, just wrap in quotes
-            return format!("\"{}\"", result.template);
-        }
-
-        // If there's a template, we need to clone it
-        if !result.template.is_empty() && !result.skip_template {
-            // Register template helper
-            self.context.register_helper("template");
-
-            // Push template and get variable name
-            let tmpl_idx = self
-                .context
-                .push_template(result.template.clone(), result.is_svg);
-            let tmpl_var = format!("_tmpl${}", tmpl_idx + 1);
-
-            // Generate element variable
-            let elem_var = result.id.clone().unwrap_or_else(|| "_el$".to_string());
-
-            // Build IIFE
-            code.push_str("(() => {\n");
-            code.push_str(&format!(
-                "  const {} = {}.cloneNode(true);\n",
-                elem_var, tmpl_var
-            ));
-
-            // Add declarations (element walking for nested elements)
-            for decl in &result.declarations {
-                code.push_str(&format!("  const {} = {};\n", decl.name, decl.init));
-            }
-
-            // Add expressions (effects, inserts, etc.)
-            for expr in &result.exprs {
-                code.push_str(&format!("  {};\n", expr.code));
-            }
-
-            // Add dynamic bindings
-            for binding in &result.dynamics {
-                self.context.register_helper("effect");
-                // Register the appropriate helper based on binding key
-                if binding.key == "style" {
-                    self.context.register_helper("style");
-                } else if binding.key == "classList" {
-                    self.context.register_helper("classList");
-                } else {
-                    self.context.register_helper("setAttribute");
-                }
-                let setter = crate::template::generate_set_attr(binding);
-                code.push_str(&format!("  effect(() => {});\n", setter));
-            }
-
-            code.push_str(&format!("  return {};\n", elem_var));
-            code.push_str("})()");
-        } else if !result.exprs.is_empty() {
-            // Just expressions (like a component call or fragment)
-            let expr_code = result
-                .exprs
-                .iter()
-                .map(|e| e.code.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            // Fragment expressions need memo wrapping for reactivity
-            if result.needs_memo {
-                self.context.register_helper("memo");
-                code = format!("memo({})", expr_code);
-            } else {
-                code = expr_code;
-            }
-        }
-
-        code
     }
 }
 
@@ -355,10 +284,9 @@ pub struct TransformInfo {
 impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
     // Use exit_expression instead of enter_expression to avoid
     // oxc_traverse walking into our newly created nodes (which lack scope info)
-    fn exit_expression(&mut self, node: &mut Expression<'a>, ctx: &mut TraverseCtx<'a, ()>) {
+    fn exit_expression(&mut self, node: &mut Expression<'a>, _ctx: &mut TraverseCtx<'a, ()>) {
         let new_expr = match node {
             Expression::JSXElement(element) => {
-                let source_span = element.span;
                 let result = self.transform_jsx_element(
                     element,
                     &TransformInfo {
@@ -367,10 +295,9 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
                         ..Default::default()
                     },
                 );
-                Some(self.build_dom_expression(&result, source_span, ctx))
+                Some(build_dom_output_expr(&result, &self.context))
             }
             Expression::JSXFragment(fragment) => {
-                let source_span = fragment.span;
                 let result = self.transform_fragment(
                     fragment,
                     &TransformInfo {
@@ -378,7 +305,7 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
                         ..Default::default()
                     },
                 );
-                Some(self.build_dom_expression(&result, source_span, ctx))
+                Some(build_dom_output_expr(&result, &self.context))
             }
             _ => None,
         };
@@ -389,48 +316,46 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
     }
 
     fn exit_program(&mut self, program: &mut Program<'a>, ctx: &mut TraverseCtx<'a, ()>) {
-        let helpers = self.context.helpers.borrow();
         let templates = self.context.templates.borrow();
         let delegates = self.context.delegates.borrow();
+        let has_helpers = !self.context.helpers.borrow().is_empty();
 
-        if helpers.is_empty() && templates.is_empty() {
+        if !has_helpers && templates.is_empty() && delegates.is_empty() {
             return;
         }
 
         let ast = ctx.ast;
         let span = SPAN;
 
-        // Insert template declarations
-        // const _tmpl$ = template(`<div></div>`);
-        for (i, tmpl) in templates.iter().enumerate() {
-            let tmpl_var = format!("_tmpl${}", i + 1);
-            let call_code = if tmpl.is_svg {
-                format!("template(`{}`, true)", tmpl.content)
-            } else {
-                format!("template(`{}`)", tmpl.content)
-            };
-
-            // Parse and build the declaration
-            let decl_code = format!("const {} = {};", tmpl_var, call_code);
-            if let Some(stmt) = self.parse_statement(&decl_code, ctx) {
-                program.body.insert(0, stmt);
-            }
-        }
-
         // Insert delegateEvents call if needed
         if !delegates.is_empty() {
-            let events: Vec<&str> = delegates.iter().map(|s| s.as_str()).collect();
-            let delegate_code = format!("delegateEvents([\"{}\"])", events.join("\", \""));
-            if let Some(stmt) = self.parse_statement(&format!("{};", delegate_code), ctx) {
-                program.body.push(stmt);
-            }
-            // Register helper
-            drop(helpers); // Release borrow
             self.context.register_helper("delegateEvents");
+
+            let mut elements = ast.vec_with_capacity(delegates.len());
+            for event in delegates.iter() {
+                elements.push(ArrayExpressionElement::from(ast.expression_string_literal(
+                    span,
+                    ast.allocator.alloc_str(event),
+                    None,
+                )));
+            }
+            let array = ast.expression_array(span, elements);
+            let callee = ast.expression_identifier(span, "delegateEvents");
+            let call = ast.expression_call(
+                span,
+                callee,
+                None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+                ast.vec1(Argument::from(array)),
+                false,
+            );
+            program.body.push(Statement::ExpressionStatement(
+                ast.alloc_expression_statement(span, call),
+            ));
         }
 
-        // Re-borrow helpers after potential modification
         let helpers = self.context.helpers.borrow();
+
+        let mut prepend = Vec::new();
 
         // Build import statement: import { template, effect, ... } from 'solid-js/web';
         // NOTE: This import building logic is duplicated with SSR transform.
@@ -468,66 +393,66 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
             // Create the statement
             let import_stmt = Statement::ImportDeclaration(ast.alloc(import_decl));
 
-            // Insert at the beginning of the program
-            program.body.insert(0, import_stmt);
-        }
-    }
-}
-
-impl<'a> SolidTransform<'a> {
-    /// Build DOM expression from transform result
-    fn build_dom_expression(
-        &self,
-        result: &TransformResult,
-        source_span: Span,
-        ctx: &mut TraverseCtx<'a, ()>,
-    ) -> Expression<'a> {
-        let ast = ctx.ast;
-        let span = SPAN;
-
-        // Handle text-only result directly as a string literal
-        if result.text && !result.template.is_empty() && result.child_codes.is_empty() {
-            let text = ast.allocator.alloc_str(&result.template);
-            return ast.expression_string_literal(span, text, None);
+            prepend.push(import_stmt);
         }
 
-        // Generate the DOM code string
-        let dom_code = self.build_dom_output(result);
+        // Insert template declarations
+        // const _tmpl$1 = template(`<div></div>`);
+        for (i, tmpl) in templates.iter().enumerate() {
+            let tmpl_span = tmpl.span;
+            let tmpl_var = format!("_tmpl${}", i + 1);
 
-        // Parse the code into an expression
-        let allocator = ast.allocator;
-        let source_type = SourceType::tsx();
-        let parse_result = Parser::new(allocator, &dom_code, source_type).parse();
+            let mut quasis = ast.vec_with_capacity(1);
+            let part_str = ast.allocator.alloc_str(&tmpl.content);
+            let value = TemplateElementValue {
+                raw: ast.atom(part_str),
+                cooked: Some(ast.atom(part_str)),
+            };
+            quasis.push(ast.template_element(tmpl_span, value, true));
+            let template_lit = ast.template_literal(tmpl_span, quasis, ast.vec());
+            let template_expr = Expression::TemplateLiteral(ast.alloc(template_lit));
 
-        // Try to extract the expression from the parsed program
-        if let Some(stmt) = parse_result.program.body.first() {
-            if let Statement::ExpressionStatement(expr_stmt) = stmt {
-                let mut expr = expr_stmt.expression.clone_in(allocator);
-                SpanResetVisitor { span: source_span }.visit_expression(&mut expr);
-                return expr;
+            let mut args = ast.vec_with_capacity(if tmpl.is_svg { 2 } else { 1 });
+            args.push(Argument::from(template_expr));
+            if tmpl.is_svg {
+                args.push(Argument::from(
+                    ast.expression_boolean_literal(tmpl_span, true),
+                ));
             }
+
+            let call = ast.expression_call(
+                tmpl_span,
+                ast.expression_identifier(tmpl_span, "template"),
+                None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+                args,
+                false,
+            );
+
+            let declarator = ast.variable_declarator(
+                tmpl_span,
+                VariableDeclarationKind::Const,
+                ast.binding_pattern_binding_identifier(
+                    tmpl_span,
+                    ast.allocator.alloc_str(&tmpl_var),
+                ),
+                NONE,
+                Some(call),
+                false,
+            );
+
+            prepend.push(Statement::VariableDeclaration(
+                ast.alloc_variable_declaration(
+                    tmpl_span,
+                    VariableDeclarationKind::Const,
+                    ast.vec1(declarator),
+                    false,
+                ),
+            ));
         }
 
-        // Fallback: create a string literal with the code (for debugging)
-        let code_str = ast.allocator.alloc_str(&dom_code);
-        ast.expression_string_literal(span, code_str, None)
-    }
-
-    /// Parse a statement string into a Statement
-    fn parse_statement(&self, code: &str, ctx: &mut TraverseCtx<'a, ()>) -> Option<Statement<'a>> {
-        let ast = ctx.ast;
-        let allocator = ast.allocator;
-        let source_type = SourceType::tsx();
-        let parse_result = Parser::new(allocator, code, source_type).parse();
-
-        parse_result
-            .program
-            .body
-            .first()
-            .map(|stmt| {
-                let mut stmt = stmt.clone_in(allocator);
-                SpanResetVisitor { span: SPAN }.visit_statement(&mut stmt);
-                stmt
-            })
+        // Prepend statements in correct order
+        for stmt in prepend.into_iter().rev() {
+            program.body.insert(0, stmt);
+        }
     }
 }
