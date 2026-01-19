@@ -75,6 +75,13 @@ export interface SolidOxcOptions {
    * @default true in dev mode
    */
   hot?: boolean;
+
+  /**
+   * Add Vite resolve condition `solid` (resolves JSX sources in dependencies).
+   * Disabled by default so dependencies resolve to precompiled JS unless you opt in.
+   * @default false
+   */
+  solid_condition?: boolean;
 }
 
 const defaultOptions: SolidOxcOptions = {
@@ -184,6 +191,9 @@ if (import.meta.hot) {
 
     // Handle Solid's JSX types
     config() {
+      const resolveConditions: string[] | undefined = opts.solid_condition
+        ? ['solid']
+        : undefined;
       return {
         esbuild: {
           // Let our plugin handle JSX, not esbuild
@@ -191,7 +201,7 @@ if (import.meta.hot) {
           jsxImportSource: 'solid-js',
         },
         resolve: {
-          conditions: ['solid'],
+          ...(resolveConditions ? { conditions: resolveConditions } : {}),
           dedupe: ['solid-js', 'solid-js/web'],
         },
       };

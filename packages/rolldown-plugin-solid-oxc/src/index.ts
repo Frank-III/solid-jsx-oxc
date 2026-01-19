@@ -136,7 +136,7 @@ export default function solidOxc(options: SolidOxcOptions = {}): Plugin {
           exclude: opts.exclude,
         },
       },
-      async handler(code, id) {
+      async handler(code: string, id: string) {
         // Strip query parameters (e.g., ?v=123 from dev servers)
         const fileId = id.split('?', 1)[0];
 
