@@ -9,6 +9,7 @@ export interface JsTransformOptions {
   moduleName?: string
   /**
    * Generate mode: "dom", "ssr", or "universal"
+   * Note: "universal" is currently treated as "dom" (not a separate universal renderer output).
    * @default "dom"
    */
   generate?: string

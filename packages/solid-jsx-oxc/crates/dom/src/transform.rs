@@ -62,10 +62,11 @@ impl<'a> SolidTransform<'a> {
         &self,
         node: &JSXChild<'a>,
         info: &TransformInfo,
+        ctx: &TraverseCtx<'a, ()>,
     ) -> Option<TransformResult<'a>> {
         match node {
-            JSXChild::Element(element) => Some(self.transform_jsx_element(element, info)),
-            JSXChild::Fragment(fragment) => Some(self.transform_fragment(fragment, info)),
+            JSXChild::Element(element) => Some(self.transform_jsx_element(element, info, ctx)),
+            JSXChild::Fragment(fragment) => Some(self.transform_fragment(fragment, info, ctx)),
             JSXChild::Text(text) => self.transform_text(text),
             JSXChild::ExpressionContainer(container) => {
                 self.transform_expression_container(container, info)
@@ -91,12 +92,13 @@ impl<'a> SolidTransform<'a> {
         &self,
         element: &JSXElement<'a>,
         info: &TransformInfo,
+        ctx: &TraverseCtx<'a, ()>,
     ) -> TransformResult<'a> {
         let tag_name = get_tag_name(element);
 
         // Create child transformer closure that can recursively transform children
         let child_transformer = |child: &JSXChild<'a>| -> Option<TransformResult<'a>> {
-            self.transform_node(child, info)
+            self.transform_node(child, info, ctx)
         };
 
         if is_component(&tag_name) {
@@ -115,6 +117,7 @@ impl<'a> SolidTransform<'a> {
                 &self.context,
                 self.options,
                 &child_transformer,
+                ctx,
             )
         }
     }
@@ -124,6 +127,7 @@ impl<'a> SolidTransform<'a> {
         &self,
         fragment: &JSXFragment<'a>,
         info: &TransformInfo,
+        ctx: &TraverseCtx<'a, ()>,
     ) -> TransformResult<'a> {
         let mut result = TransformResult {
             span: fragment.span,
@@ -138,7 +142,7 @@ impl<'a> SolidTransform<'a> {
                 has_expression_child = true;
             }
 
-            if let Some(child_result) = self.transform_node(child, info) {
+            if let Some(child_result) = self.transform_node(child, info, ctx) {
                 child_results.push(child_result);
             }
         }
@@ -284,7 +288,7 @@ pub struct TransformInfo {
 impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
     // Use exit_expression instead of enter_expression to avoid
     // oxc_traverse walking into our newly created nodes (which lack scope info)
-    fn exit_expression(&mut self, node: &mut Expression<'a>, _ctx: &mut TraverseCtx<'a, ()>) {
+    fn exit_expression(&mut self, node: &mut Expression<'a>, ctx: &mut TraverseCtx<'a, ()>) {
         let new_expr = match node {
             Expression::JSXElement(element) => {
                 let result = self.transform_jsx_element(
@@ -294,6 +298,7 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
                         last_element: true,
                         ..Default::default()
                     },
+                    ctx,
                 );
                 Some(build_dom_output_expr(&result, &self.context))
             }
@@ -304,6 +309,7 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
                         top_level: true,
                         ..Default::default()
                     },
+                    ctx,
                 );
                 Some(build_dom_output_expr(&result, &self.context))
             }
@@ -363,9 +369,45 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
         if !helpers.is_empty() {
             let module_name = self.options.module_name;
 
+            // Avoid duplicating helper imports when transforming pre-compiled sources (e.g. node_modules),
+            // by checking for existing local bindings from the same module.
+            let mut existing_helper_locals = std::collections::HashSet::<String>::new();
+            let mut first_module_import_index: Option<usize> = None;
+            for (i, stmt) in program.body.iter().enumerate() {
+                let Statement::ImportDeclaration(import_decl) = stmt else {
+                    continue;
+                };
+                if import_decl.import_kind != ImportOrExportKind::Value {
+                    continue;
+                }
+                if import_decl.source.value.as_str() != module_name {
+                    continue;
+                }
+
+                if first_module_import_index.is_none() && import_decl.specifiers.is_some() {
+                    first_module_import_index = Some(i);
+                }
+
+                if let Some(specifiers) = &import_decl.specifiers {
+                    for spec in specifiers.iter() {
+                        match spec {
+                            ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                                existing_helper_locals.insert(s.local.name.as_str().to_string());
+                            }
+                            ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
+                                existing_helper_locals.insert(s.local.name.as_str().to_string());
+                            }
+                            ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
+                                existing_helper_locals.insert(s.local.name.as_str().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
             // Build specifiers
             let mut specifiers = ast.vec();
-            for helper in helpers.iter() {
+            for helper in helpers.iter().filter(|h| !existing_helper_locals.contains(*h)) {
                 let helper_str = ast.allocator.alloc_str(helper);
                 let imported =
                     ModuleExportName::IdentifierName(ast.identifier_name(span, helper_str));
@@ -377,23 +419,37 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
                 ));
             }
 
-            // Build source string literal
-            let source = ast.string_literal(span, module_name, None);
+            if !specifiers.is_empty() {
+                // Prefer augmenting the first existing import from the module to avoid extra imports.
+                if let Some(import_index) = first_module_import_index {
+                    if let Statement::ImportDeclaration(import_decl) = &mut program.body[import_index]
+                    {
+                        let decl_specifiers =
+                            import_decl.specifiers.get_or_insert_with(|| ast.vec());
+                        decl_specifiers.extend(specifiers);
+                    } else {
+                        debug_assert!(false, "stored import index should still be an import");
+                    }
+                } else {
+                    // Build source string literal
+                    let source = ast.string_literal(span, module_name, None);
 
-            // Build import declaration
-            let import_decl = ast.import_declaration(
-                span,
-                Some(specifiers),
-                source,
-                None,                                 // phase
-                None::<oxc_ast::ast::WithClause<'a>>, // with_clause
-                ImportOrExportKind::Value,
-            );
+                    // Build import declaration
+                    let import_decl = ast.import_declaration(
+                        span,
+                        Some(specifiers),
+                        source,
+                        None,                                 // phase
+                        None::<oxc_ast::ast::WithClause<'a>>, // with_clause
+                        ImportOrExportKind::Value,
+                    );
 
-            // Create the statement
-            let import_stmt = Statement::ImportDeclaration(ast.alloc(import_decl));
+                    // Create the statement
+                    let import_stmt = Statement::ImportDeclaration(ast.alloc(import_decl));
 
-            prepend.push(import_stmt);
+                    prepend.push(import_stmt);
+                }
+            }
         }
 
         // Insert template declarations

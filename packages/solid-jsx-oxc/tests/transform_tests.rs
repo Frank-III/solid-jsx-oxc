@@ -192,6 +192,32 @@ fn test_dom_ref_callback() {
     assert!(code.contains("setRef"));
 }
 
+#[test]
+fn test_dom_ref_const_identifier_no_assignment_fallback() {
+    let code = transform_dom(
+        r#"
+        const [header, setHeader] = createSignal();
+        <div ref={setHeader}>content</div>
+        "#,
+    );
+    assert!(code.contains("setHeader"), "Output was:\n{code}");
+    assert!(!code.contains("setHeader=_el$"), "Output was:\n{code}");
+}
+
+#[test]
+fn test_dom_does_not_duplicate_existing_solid_web_imports() {
+    let code = transform_dom(
+        r#"
+        import { mergeProps } from "solid-js/web";
+        const props = {};
+        const Comp = (p) => p;
+        <Comp {...props} a={1} />
+        "#,
+    );
+    assert!(code.contains("solid-js/web"), "Output was:\n{code}");
+    assert_eq!(code.matches("solid-js/web").count(), 1, "Output was:\n{code}");
+}
+
 // ============================================================================
 // DOM: Style
 // ============================================================================

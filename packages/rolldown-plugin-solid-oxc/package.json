@@ -1,6 +1,6 @@
 {
   "name": "rolldown-plugin-solid-oxc",
-  "version": "0.1.0-alpha.9",
+  "version": "0.1.0-alpha.12",
   "description": "Rolldown plugin for SolidJS using OXC-based compiler",
   "type": "module",
   "main": "dist/index.js",
@@ -16,8 +16,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts",
-    "dev": "tsup src/index.ts --format esm --dts --watch"
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json -w"
   },
   "keywords": [
     "rolldown",
@@ -44,7 +44,6 @@
   "devDependencies": {
     "solid-jsx-oxc": "workspace:*",
     "@types/node": "^20.0.0",
-    "tsup": "^8.0.0",
     "typescript": "^5.0.0"
   }
 }

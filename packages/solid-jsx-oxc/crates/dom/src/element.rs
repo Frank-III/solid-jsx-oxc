@@ -10,6 +10,8 @@ use oxc_ast::AstBuilder;
 use oxc_ast::NONE;
 use oxc_span::{Span, SPAN};
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, UnaryOperator};
+use oxc_syntax::symbol::SymbolFlags;
+use oxc_traverse::TraverseCtx;
 
 use common::{
     constants::{ALIASES, DELEGATED_EVENTS, VOID_ELEMENTS},
@@ -102,6 +104,7 @@ pub fn transform_element<'a, 'b>(
     context: &BlockContext<'a>,
     options: &TransformOptions<'a>,
     transform_child: ChildTransformer<'a, 'b>,
+    ctx: &TraverseCtx<'a, ()>,
 ) -> TransformResult<'a> {
     let ast = context.ast();
     let is_svg = is_svg_element(tag_name);
@@ -145,7 +148,7 @@ pub fn transform_element<'a, 'b>(
     result.template_with_closing_tags = result.template.clone();
 
     // Transform attributes
-    transform_attributes(element, &mut result, context, options);
+    transform_attributes(element, &mut result, context, options, ctx);
 
     // Close opening tag
     result.template.push('>');
@@ -173,6 +176,7 @@ pub fn transform_element<'a, 'b>(
             context,
             options,
             transform_child,
+            ctx,
         );
 
         // Close tag
@@ -259,6 +263,7 @@ fn transform_attributes<'a>(
     result: &mut TransformResult<'a>,
     context: &BlockContext<'a>,
     options: &TransformOptions<'a>,
+    ctx: &TraverseCtx<'a, ()>,
 ) {
     let ast = context.ast();
     let elem_id = result.id.clone();
@@ -266,7 +271,7 @@ fn transform_attributes<'a>(
     for attr in &element.opening_element.attributes {
         match attr {
             JSXAttributeItem::Attribute(attr) => {
-                transform_attribute(attr, elem_id.as_deref(), result, context, options);
+                transform_attribute(attr, elem_id.as_deref(), result, context, options, ctx);
             }
             JSXAttributeItem::SpreadAttribute(spread) => {
                 // Handle {...props} spread
@@ -295,13 +300,14 @@ fn transform_attribute<'a>(
     result: &mut TransformResult<'a>,
     context: &BlockContext<'a>,
     options: &TransformOptions<'a>,
+    ctx: &TraverseCtx<'a, ()>,
 ) {
     let key = get_attr_name(&attr.name);
 
     // Handle different attribute types
     if key == "ref" {
         let elem_id = elem_id.expect("ref requires an element id");
-        transform_ref(attr, elem_id, result, context);
+        transform_ref(attr, elem_id, result, context, ctx);
         return;
     }
 
@@ -397,6 +403,7 @@ fn transform_ref<'a>(
     elem_id: &str,
     result: &mut TransformResult<'a>,
     context: &BlockContext<'a>,
+    ctx: &TraverseCtx<'a, ()>,
 ) {
     let ast = context.ast();
     if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
@@ -437,22 +444,57 @@ fn transform_ref<'a>(
                     [elem.clone_in(ast.allocator)],
                 );
 
-                let assign = expression_to_assignment_target(ref_expr.clone_in(ast.allocator))
-                    .map(|target| {
-                        ast.expression_assignment(
-                            SPAN,
-                            AssignmentOperator::Assign,
-                            target,
-                            elem.clone_in(ast.allocator),
-                        )
-                    })
-                    .unwrap_or_else(|| ast.expression_identifier(SPAN, "undefined"));
+                let assign = if is_writable_ref_target(expr, ctx) {
+                    expression_to_assignment_target(ref_expr.clone_in(ast.allocator))
+                        .map(|target| {
+                            ast.expression_assignment(
+                                SPAN,
+                                AssignmentOperator::Assign,
+                                target,
+                                elem.clone_in(ast.allocator),
+                            )
+                        })
+                        .unwrap_or_else(|| ast.expression_identifier(SPAN, "undefined"))
+                } else {
+                    ast.expression_identifier(SPAN, "undefined")
+                };
 
                 result
                     .exprs
                     .push(ast.expression_conditional(SPAN, test, call, assign));
             }
         }
+    }
+}
+
+fn is_writable_ref_target<'a>(expr: &Expression<'a>, ctx: &TraverseCtx<'a, ()>) -> bool {
+    let Some(ident) = peel_identifier_reference(expr) else {
+        return true;
+    };
+
+    let Some(reference_id) = ident.reference_id.get() else {
+        return true;
+    };
+
+    let reference = ctx.scoping.scoping().get_reference(reference_id);
+    let Some(symbol_id) = reference.symbol_id() else {
+        return true;
+    };
+
+    let flags = ctx.scoping.scoping().symbol_flags(symbol_id);
+    !(flags.is_const_variable() || flags.contains(SymbolFlags::Import) || flags.contains(SymbolFlags::TypeImport))
+}
+
+fn peel_identifier_reference<'a, 'b>(
+    expr: &'b Expression<'a>,
+) -> Option<&'b oxc_ast::ast::IdentifierReference<'a>> {
+    match expr {
+        Expression::Identifier(ident) => Some(ident),
+        Expression::TSAsExpression(e) => peel_identifier_reference(&e.expression),
+        Expression::TSSatisfiesExpression(e) => peel_identifier_reference(&e.expression),
+        Expression::TSNonNullExpression(e) => peel_identifier_reference(&e.expression),
+        Expression::TSTypeAssertion(e) => peel_identifier_reference(&e.expression),
+        _ => None,
     }
 }
 
@@ -864,6 +906,7 @@ fn transform_children<'a, 'b>(
     context: &BlockContext<'a>,
     options: &TransformOptions<'a>,
     transform_child: ChildTransformer<'a, 'b>,
+    ctx: &TraverseCtx<'a, ()>,
 ) {
     fn child_path(base: &[String], node_index: usize) -> Vec<String> {
         let mut path = base.to_vec();
@@ -930,6 +973,7 @@ fn transform_children<'a, 'b>(
         context: &BlockContext<'a>,
         options: &TransformOptions<'a>,
         transform_child: ChildTransformer<'a, 'b>,
+        ctx: &TraverseCtx<'a, ()>,
         node_index: &mut usize,
         last_was_text: &mut bool,
         single_dynamic: bool,
@@ -1021,6 +1065,7 @@ fn transform_children<'a, 'b>(
                         context,
                         options,
                         transform_child,
+                        ctx,
                     );
 
                     result.template.push_str(&child_result.template);
@@ -1099,6 +1144,7 @@ fn transform_children<'a, 'b>(
                         context,
                         options,
                         transform_child,
+                        ctx,
                         node_index,
                         last_was_text,
                         single_dynamic,
@@ -1119,6 +1165,7 @@ fn transform_children<'a, 'b>(
         context,
         options,
         transform_child,
+        ctx,
         &mut node_index,
         &mut last_was_text,
         single_dynamic,

@@ -175,9 +175,45 @@ impl<'a> Traverse<'a, ()> for SSRTransform<'a> {
         let span = SPAN;
         let module_name = self.options.module_name;
 
+        // Avoid duplicating helper imports when transforming pre-compiled sources (e.g. node_modules),
+        // by checking for existing local bindings from the same module.
+        let mut existing_helper_locals = std::collections::HashSet::<String>::new();
+        let mut first_module_import_index: Option<usize> = None;
+        for (i, stmt) in program.body.iter().enumerate() {
+            let Statement::ImportDeclaration(import_decl) = stmt else {
+                continue;
+            };
+            if import_decl.import_kind != ImportOrExportKind::Value {
+                continue;
+            }
+            if import_decl.source.value.as_str() != module_name {
+                continue;
+            }
+
+            if first_module_import_index.is_none() && import_decl.specifiers.is_some() {
+                first_module_import_index = Some(i);
+            }
+
+            if let Some(specifiers) = &import_decl.specifiers {
+                for spec in specifiers.iter() {
+                    match spec {
+                        ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                            existing_helper_locals.insert(s.local.name.as_str().to_string());
+                        }
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
+                            existing_helper_locals.insert(s.local.name.as_str().to_string());
+                        }
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
+                            existing_helper_locals.insert(s.local.name.as_str().to_string());
+                        }
+                    }
+                }
+            }
+        }
+
         // Build specifiers
         let mut specifiers = ast.vec();
-        for helper in helpers.iter() {
+        for helper in helpers.iter().filter(|h| !existing_helper_locals.contains(*h)) {
             let helper_str = ast.allocator.alloc_str(helper);
             let imported = ModuleExportName::IdentifierName(ast.identifier_name(span, helper_str));
             let local = ast.binding_identifier(span, helper_str);
@@ -185,6 +221,19 @@ impl<'a> Traverse<'a, ()> for SSRTransform<'a> {
             specifiers.push(ImportDeclarationSpecifier::ImportSpecifier(
                 ast.alloc(specifier),
             ));
+        }
+
+        if specifiers.is_empty() {
+            return;
+        }
+
+        // Prefer augmenting the first existing import from the module to avoid extra imports.
+        if let Some(import_index) = first_module_import_index {
+            if let Statement::ImportDeclaration(import_decl) = &mut program.body[import_index] {
+                let decl_specifiers = import_decl.specifiers.get_or_insert_with(|| ast.vec());
+                decl_specifiers.extend(specifiers);
+                return;
+            }
         }
 
         // Build source string literal
