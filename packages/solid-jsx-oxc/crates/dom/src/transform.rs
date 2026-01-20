@@ -165,47 +165,20 @@ impl<'a> SolidTransform<'a> {
             return single_result;
         }
 
-        // Multiple children - check if we need array output
-        let has_text_child = child_results.iter().any(|r| r.text);
-        let has_element_child = child_results
-            .iter()
-            .any(|r| !r.template.is_empty() && !r.text);
-        let has_component_child = child_results
-            .iter()
-            .any(|r| r.template.is_empty() && !r.exprs.is_empty());
-
-        // Use array output when mixing different types of children
-        let needs_array = (has_text_child && has_element_child)
-            || (has_text_child && has_component_child)
-            || (has_element_child && has_component_child)
-            || has_component_child;
-
-        if needs_array {
-            // Mixed children: need array output
-            result.child_results = child_results;
-        } else if has_element_child {
-            // All native element children - merge templates
-            for child_result in child_results {
-                result.template.push_str(&child_result.template);
-                result.declarations.extend(child_result.declarations);
-                result.exprs.extend(child_result.exprs);
-                result.dynamics.extend(child_result.dynamics);
-            }
-        } else if has_text_child {
-            // All text children - merge templates
+        // Multiple children:
+        // `template()` only returns the first root node, so fragments with more than one root
+        // must be emitted as arrays of child outputs.
+        //
+        // The only safe merge is for plain text, which can be concatenated into a single
+        // string expression.
+        let all_text_children = child_results.iter().all(|r| r.text);
+        if all_text_children {
+            result.text = true;
             for child_result in child_results {
                 result.template.push_str(&child_result.template);
             }
         } else {
-            // All expression children (non-component expressions like {x()})
-            for child_result in child_results {
-                result.exprs.extend(child_result.exprs);
-            }
-
-            // Wrap in memo for expression children
-            if info.top_level && has_expression_child {
-                result.needs_memo = true;
-            }
+            result.child_results = child_results;
         }
 
         result

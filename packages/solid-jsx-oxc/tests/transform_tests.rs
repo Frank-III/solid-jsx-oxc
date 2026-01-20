@@ -598,6 +598,43 @@ fn test_fragment_with_children() {
 }
 
 #[test]
+fn test_fragment_multiple_root_elements_declare_el_bindings() {
+    // Regression: multi-root fragments must not merge into a single template output
+    // (template() only returns the first root), and must not reference undeclared _el$ bindings.
+    let code = transform_dom(r#"<><div class={a()}></div><div class={b()}></div></>"#);
+
+    assert!(code.contains("a()"), "Output was:\n{code}");
+    assert!(code.contains("b()"), "Output was:\n{code}");
+
+    // Collect all _el$<n> references and ensure each has a corresponding `const _el$<n>`.
+    let mut referenced: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let bytes = code.as_bytes();
+    let mut i = 0usize;
+    while i + 4 < bytes.len() {
+        if bytes[i] == b'_' && bytes[i + 1] == b'e' && bytes[i + 2] == b'l' && bytes[i + 3] == b'$'
+        {
+            let mut j = i + 4;
+            if j < bytes.len() && bytes[j].is_ascii_digit() {
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                referenced.insert(code[i..j].to_string());
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    for id in referenced {
+        assert!(
+            code.contains(&format!("const {id}")),
+            "Expected declaration for {id} in output:\n{code}"
+        );
+    }
+}
+
+#[test]
 fn test_svg_element() {
     let code = transform_dom(r#"<svg><circle cx="50" cy="50" r="40" /></svg>"#);
     assert!(code.contains("svg"));
