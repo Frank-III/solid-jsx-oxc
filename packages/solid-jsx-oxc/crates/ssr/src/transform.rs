@@ -175,8 +175,9 @@ impl<'a> Traverse<'a, ()> for SSRTransform<'a> {
         let span = SPAN;
         let module_name = self.options.module_name;
 
-        // Avoid duplicating helper imports when transforming pre-compiled sources (e.g. node_modules),
-        // by checking for existing local bindings from the same module.
+        // Avoid duplicating helper imports by checking for existing local bindings.
+        // We check ALL imports (not just from module_name) because helpers like
+        // `mergeProps` can be imported from either `solid-js` or `solid-js/web`.
         let mut existing_helper_locals = std::collections::HashSet::<String>::new();
         let mut first_module_import_index: Option<usize> = None;
         for (i, stmt) in program.body.iter().enumerate() {
@@ -186,14 +187,18 @@ impl<'a> Traverse<'a, ()> for SSRTransform<'a> {
             if import_decl.import_kind != ImportOrExportKind::Value {
                 continue;
             }
-            if import_decl.source.value.as_str() != module_name {
-                continue;
-            }
 
-            if first_module_import_index.is_none() && import_decl.specifiers.is_some() {
+            let is_target_module = import_decl.source.value.as_str() == module_name;
+
+            // Track first import from target module for augmentation
+            if is_target_module
+                && first_module_import_index.is_none()
+                && import_decl.specifiers.is_some()
+            {
                 first_module_import_index = Some(i);
             }
 
+            // Collect ALL import bindings to avoid duplicate declarations
             if let Some(specifiers) = &import_decl.specifiers {
                 for spec in specifiers.iter() {
                     match spec {

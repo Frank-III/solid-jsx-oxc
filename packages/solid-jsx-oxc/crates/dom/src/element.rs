@@ -423,45 +423,53 @@ fn transform_ref<'a>(
             } else {
                 // It's a variable reference: ref={myRef}
                 // Could be a signal setter or plain variable - check at runtime
-                let typeof_ref = ast.expression_unary(
-                    SPAN,
-                    UnaryOperator::Typeof,
-                    ref_expr.clone_in(ast.allocator),
-                );
-                let function_str =
-                    ast.expression_string_literal(SPAN, ast.allocator.alloc_str("function"), None);
-                let test = ast.expression_binary(
-                    SPAN,
-                    typeof_ref,
-                    BinaryOperator::StrictEquality,
-                    function_str,
-                );
+                if is_writable_ref_target(expr, ctx) {
+                    // Non-const variable: generate typeof check with assignment fallback
+                    let typeof_ref = ast.expression_unary(
+                        SPAN,
+                        UnaryOperator::Typeof,
+                        ref_expr.clone_in(ast.allocator),
+                    );
+                    let function_str = ast.expression_string_literal(
+                        SPAN,
+                        ast.allocator.alloc_str("function"),
+                        None,
+                    );
+                    let test = ast.expression_binary(
+                        SPAN,
+                        typeof_ref,
+                        BinaryOperator::StrictEquality,
+                        function_str,
+                    );
 
-                let call = call_expr(
-                    ast,
-                    attr.span,
-                    ref_expr.clone_in(ast.allocator),
-                    [elem.clone_in(ast.allocator)],
-                );
+                    let call = call_expr(
+                        ast,
+                        attr.span,
+                        ref_expr.clone_in(ast.allocator),
+                        [elem.clone_in(ast.allocator)],
+                    );
 
-                let assign = if is_writable_ref_target(expr, ctx) {
-                    expression_to_assignment_target(ref_expr.clone_in(ast.allocator))
-                        .map(|target| {
-                            ast.expression_assignment(
-                                SPAN,
-                                AssignmentOperator::Assign,
-                                target,
-                                elem.clone_in(ast.allocator),
-                            )
-                        })
-                        .unwrap_or_else(|| ast.expression_identifier(SPAN, "undefined"))
+                    let assign =
+                        expression_to_assignment_target(ref_expr.clone_in(ast.allocator))
+                            .map(|target| {
+                                ast.expression_assignment(
+                                    SPAN,
+                                    AssignmentOperator::Assign,
+                                    target,
+                                    elem.clone_in(ast.allocator),
+                                )
+                            })
+                            .unwrap_or_else(|| ast.expression_identifier(SPAN, "undefined"));
+
+                    result
+                        .exprs
+                        .push(ast.expression_conditional(SPAN, test, call, assign));
                 } else {
-                    ast.expression_identifier(SPAN, "undefined")
-                };
-
-                result
-                    .exprs
-                    .push(ast.expression_conditional(SPAN, test, call, assign));
+                    // Const/import binding: must be a function (e.g., signal setter), just call it
+                    result
+                        .exprs
+                        .push(call_expr(ast, attr.span, ref_expr, [elem]));
+                }
             }
         }
     }
