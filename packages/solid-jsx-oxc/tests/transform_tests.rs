@@ -120,6 +120,17 @@ fn test_dom_onscroll_not_delegated() {
     assert!(code.contains("addEventListener") || code.contains("onscroll"));
 }
 
+#[test]
+fn test_dom_compound_event_name_lowercase() {
+    // Compound event names like onMouseDown should become "mousedown" (all lowercase)
+    let code = transform_dom(r#"<div onMouseDown={handler}>test</div>"#);
+    assert!(
+        code.contains("$$mousedown"),
+        "onMouseDown should produce lowercase 'mousedown', got: {}",
+        code
+    );
+}
+
 // ============================================================================
 // DOM: Dynamic Children
 // ============================================================================

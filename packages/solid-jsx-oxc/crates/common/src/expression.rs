@@ -118,13 +118,8 @@ pub fn to_event_name(name: &str) -> String {
         // Handle on:click -> click (namespaced form)
         name[3..].to_string()
     } else if name.starts_with("on") {
-        let event = &name[2..];
-        // Handle onClick -> click (lowercase first char)
-        if let Some(first) = event.chars().next() {
-            format!("{}{}", first.to_lowercase(), &event[first.len_utf8()..])
-        } else {
-            String::new()
-        }
+        // Handle onClick -> click, onMouseDown -> mousedown (lowercase entire name)
+        name[2..].to_lowercase()
     } else {
         name.to_string()
     }
