@@ -229,6 +229,30 @@ fn test_dom_does_not_duplicate_existing_solid_web_imports() {
     assert_eq!(code.matches("solid-js/web").count(), 1, "Output was:\n{code}");
 }
 
+#[test]
+fn test_dom_does_not_duplicate_mergeprops_from_solid_js() {
+    // mergeProps can be imported from "solid-js" (re-export) instead of "solid-js/web"
+    // The transformer should not add a duplicate import
+    let code = transform_dom(
+        r#"
+        import { mergeProps } from "solid-js";
+        const props = {};
+        const Comp = (p) => p;
+        <Comp {...props} a={1} />
+        "#,
+    );
+    // Should use the existing mergeProps import, not add a new one
+    assert!(
+        !code.contains("mergeProps } from \"solid-js/web\""),
+        "Should not add duplicate mergeProps import from solid-js/web. Output was:\n{code}"
+    );
+    // The existing import should be preserved
+    assert!(
+        code.contains("mergeProps } from \"solid-js\""),
+        "Should preserve the existing mergeProps import from solid-js. Output was:\n{code}"
+    );
+}
+
 // ============================================================================
 // DOM: Style
 // ============================================================================
