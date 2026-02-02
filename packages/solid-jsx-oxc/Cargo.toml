@@ -37,6 +37,10 @@ indexmap = "2.12.0"
 common = { path = "crates/common" }
 dom = { path = "crates/dom" }
 ssr = { path = "crates/ssr" }
+solid-linter = { path = "crates/linter" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [dependencies]
 napi = { workspace = true, optional = true }

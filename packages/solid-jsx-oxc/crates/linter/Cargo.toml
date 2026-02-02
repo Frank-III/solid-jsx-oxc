@@ -1,0 +1,24 @@
+[package]
+name = "solid-linter"
+version = "0.1.0"
+edition = "2021"
+description = "Solid-specific lint rules - standalone analysis library"
+license = "MIT"
+
+[dependencies]
+oxc_ast = { workspace = true }
+oxc_ast_visit = { workspace = true }
+oxc_span = { workspace = true }
+oxc_allocator = { workspace = true }
+oxc_semantic = { workspace = true }
+oxc_syntax = { workspace = true }
+
+common = { workspace = true }
+
+rustc-hash = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+oxc_parser = { workspace = true }
+insta = "1.43"
