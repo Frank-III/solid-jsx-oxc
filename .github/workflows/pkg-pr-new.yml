@@ -55,7 +55,7 @@ jobs:
       - name: Build native addon
         working-directory: packages/solid-jsx-oxc
         run: |
-          npx napi build --platform --release --features napi --no-js --dts binding.d.ts \
+          npx @napi-rs/cli build --platform --release --features napi --no-js --dts binding.d.ts \
             --target ${{ matrix.settings.target }} ${{ matrix.settings.flags }}
       - name: Upload artifact
         uses: actions/upload-artifact@v4
