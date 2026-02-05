@@ -22,7 +22,7 @@ jobs:
         with:
           node-version: 20
       - name: Install deps
-        run: bun install
+        run: bun install --ignore-scripts
       - name: Build native addon
         working-directory: packages/solid-jsx-oxc
         run: bun run build
