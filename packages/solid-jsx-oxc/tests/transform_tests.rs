@@ -216,6 +216,64 @@ fn test_dom_ref_const_identifier_no_assignment_fallback() {
 }
 
 #[test]
+fn test_component_ref_const_identifier_passed_directly() {
+    // Component refs for const bindings (signal setters) should be passed directly
+    // without the typeof ternary wrapper, matching babel-plugin-jsx-dom-expressions.
+    let code = transform_dom(
+        r#"
+        const [ref, setRef] = createSignal();
+        const Child = (p) => p;
+        <Child ref={setRef}>content</Child>
+        "#,
+    );
+    eprintln!("=== Component ref const output ===\n{code}\n===");
+    assert!(code.contains("ref: setRef"), "Expected direct ref pass, output was:\n{code}");
+    assert!(!code.contains("typeof"), "Should not have typeof check for const ref, output was:\n{code}");
+}
+
+#[test]
+fn test_component_ref_signal_setter_realistic() {
+    // Realistic pattern from agents-sidebar.tsx
+    let code = transform_dom(
+        r#"
+        import { createSignal } from "solid-js";
+        const [searchInputRef, setSearchInputRef] = createSignal(null);
+        const Input = (p) => p;
+        <Input ref={setSearchInputRef} placeholder="Search" />
+        "#,
+    );
+    eprintln!("=== Realistic component ref output ===\n{code}\n===");
+    assert!(!code.contains("typeof"), "Should not have typeof check for const signal setter ref, output was:\n{code}");
+    assert!(!code.contains("setSearchInputRef ="), "Should not assign to const, output was:\n{code}");
+}
+
+#[test]
+fn test_component_ref_let_variable_gets_ternary() {
+    // Component refs for let variables should still get the typeof ternary.
+    let code = transform_dom(
+        r#"
+        let childRef;
+        const Child = (p) => p;
+        <Child ref={childRef}>content</Child>
+        "#,
+    );
+    assert!(code.contains("typeof"), "Expected typeof check for let ref, output was:\n{code}");
+}
+
+#[test]
+fn test_component_ref_arrow_function_passed_directly() {
+    // Arrow function refs should be passed directly.
+    let code = transform_dom(
+        r#"
+        let el;
+        const Child = (p) => p;
+        <Child ref={e => el = e}>content</Child>
+        "#,
+    );
+    assert!(!code.contains("typeof"), "Should not have typeof check for arrow function ref, output was:\n{code}");
+}
+
+#[test]
 fn test_dom_does_not_duplicate_existing_solid_web_imports() {
     let code = transform_dom(
         r#"

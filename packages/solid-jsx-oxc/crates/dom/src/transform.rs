@@ -108,6 +108,7 @@ impl<'a> SolidTransform<'a> {
                 &self.context,
                 self.options,
                 &child_transformer,
+                ctx,
             )
         } else {
             transform_element(

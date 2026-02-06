@@ -12,9 +12,11 @@ use oxc_ast::AstBuilder;
 use oxc_ast::NONE;
 use oxc_span::SPAN;
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, UnaryOperator};
+use oxc_traverse::TraverseCtx;
 
 use common::{is_dynamic, TransformOptions};
 
+use crate::element::is_writable_ref_target;
 use crate::ir::{BlockContext, ChildTransformer, TransformResult};
 use crate::output::build_dom_output_expr;
 
@@ -96,10 +98,15 @@ fn expression_to_assignment_target<'a>(expr: Expression<'a>) -> Option<Assignmen
             Some(AssignmentTarget::ComputedMemberExpression(m))
         }
         Expression::PrivateFieldExpression(m) => Some(AssignmentTarget::PrivateFieldExpression(m)),
-        Expression::TSAsExpression(e) => Some(AssignmentTarget::TSAsExpression(e)),
-        Expression::TSSatisfiesExpression(e) => Some(AssignmentTarget::TSSatisfiesExpression(e)),
-        Expression::TSNonNullExpression(e) => Some(AssignmentTarget::TSNonNullExpression(e)),
-        Expression::TSTypeAssertion(e) => Some(AssignmentTarget::TSTypeAssertion(e)),
+        // Strip TS type wrappers — the inner expression is the actual assignment target.
+        Expression::TSAsExpression(e) => expression_to_assignment_target(e.unbox().expression),
+        Expression::TSSatisfiesExpression(e) => {
+            expression_to_assignment_target(e.unbox().expression)
+        }
+        Expression::TSNonNullExpression(e) => {
+            expression_to_assignment_target(e.unbox().expression)
+        }
+        Expression::TSTypeAssertion(e) => expression_to_assignment_target(e.unbox().expression),
         _ => None,
     }
 }
@@ -185,6 +192,7 @@ pub fn transform_component<'a, 'b>(
     context: &BlockContext<'a>,
     options: &TransformOptions<'a>,
     transform_child: ChildTransformer<'a, 'b>,
+    ctx: &TraverseCtx<'a, ()>,
 ) -> TransformResult<'a> {
     let ast = context.ast();
     let mut result = TransformResult {
@@ -195,7 +203,7 @@ pub fn transform_component<'a, 'b>(
     context.register_helper("createComponent");
 
     // Build props object
-    let props = build_props(element, context, options, transform_child);
+    let props = build_props(element, context, options, transform_child, ctx);
 
     // Generate createComponent call
     let callee = ast.expression_identifier(SPAN, "createComponent");
@@ -222,6 +230,7 @@ fn build_props<'a, 'b>(
     context: &BlockContext<'a>,
     _options: &TransformOptions<'a>,
     transform_child: ChildTransformer<'a, 'b>,
+    ctx: &TraverseCtx<'a, ()>,
 ) -> Expression<'a> {
     let ast = context.ast();
     let span = SPAN;
@@ -250,115 +259,145 @@ fn build_props<'a, 'b>(
                 if raw_key == "ref" {
                     if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
                         if let Some(expr) = container.expression.as_expression() {
-                            // ref(r$) { var _ref$ = expr; typeof _ref$ === "function" ? _ref$(r$) : expr = r$; }
-                            let ref_param = ast.binding_pattern_binding_identifier(
-                                span,
-                                ast.allocator.alloc_str("r$"),
-                            );
-
-                            let params = ast.alloc_formal_parameters(
-                                span,
-                                FormalParameterKind::FormalParameter,
-                                ast.vec1(ast.plain_formal_parameter(span, ref_param)),
-                                NONE,
-                            );
-
-                            let mut body_stmts = ast.vec_with_capacity(2);
-                            let init_expr = context.clone_expr(expr);
-                            let var_decl = {
-                                let declarator = ast.variable_declarator(
+                            // For const/import bindings and function expressions,
+                            // pass the ref directly (no ternary needed).
+                            // Matches babel-plugin-jsx-dom-expressions behavior.
+                            if matches!(
+                                expr,
+                                Expression::ArrowFunctionExpression(_)
+                                    | Expression::FunctionExpression(_)
+                            ) || !is_writable_ref_target(expr, ctx)
+                            {
+                                dynamic_props.push(ast.object_property_kind_object_property(
                                     span,
-                                    VariableDeclarationKind::Var,
-                                    ast.binding_pattern_binding_identifier(
-                                        span,
-                                        ast.allocator.alloc_str("_ref$"),
+                                    PropertyKind::Init,
+                                    PropertyKey::StaticIdentifier(
+                                        ast.alloc_identifier_name(span, "ref"),
                                     ),
-                                    NONE,
-                                    Some(init_expr),
+                                    context.clone_expr(expr),
                                     false,
+                                    false,
+                                    false,
+                                ));
+                            } else {
+                                // Non-const variable: generate typeof check with assignment fallback
+                                // ref(r$) { var _ref$ = expr; typeof _ref$ === "function" ? _ref$(r$) : expr = r$; }
+                                let ref_param = ast.binding_pattern_binding_identifier(
+                                    span,
+                                    ast.allocator.alloc_str("r$"),
                                 );
-                                Statement::VariableDeclaration(ast.alloc_variable_declaration(
+
+                                let params = ast.alloc_formal_parameters(
                                     span,
-                                    VariableDeclarationKind::Var,
-                                    ast.vec1(declarator),
-                                    false,
-                                ))
-                            };
-                            body_stmts.push(var_decl);
+                                    FormalParameterKind::FormalParameter,
+                                    ast.vec1(ast.plain_formal_parameter(span, ref_param)),
+                                    NONE,
+                                );
 
-                            let ref_ident = ast.expression_identifier(span, "_ref$");
-                            let r_ident = ast.expression_identifier(span, "r$");
-                            let typeof_ref = ast.expression_unary(
-                                span,
-                                UnaryOperator::Typeof,
-                                ref_ident.clone_in(ast.allocator),
-                            );
-                            let function_str = ast.expression_string_literal(
-                                span,
-                                ast.allocator.alloc_str("function"),
-                                None,
-                            );
-                            let test = ast.expression_binary(
-                                span,
-                                typeof_ref,
-                                BinaryOperator::StrictEquality,
-                                function_str,
-                            );
-
-                            let call = {
-                                let mut args = ast.vec_with_capacity(1);
-                                args.push(Argument::from(r_ident.clone_in(ast.allocator)));
-                                ast.expression_call(
-                                    span,
-                                    ref_ident.clone_in(ast.allocator),
-                                    None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
-                                    args,
-                                    false,
-                                )
-                            };
-
-                            let assign = expression_to_assignment_target(context.clone_expr(expr))
-                                .map(|target| {
-                                    ast.expression_assignment(
+                                let mut body_stmts = ast.vec_with_capacity(2);
+                                let init_expr = context.clone_expr(expr);
+                                let var_decl = {
+                                    let declarator = ast.variable_declarator(
                                         span,
-                                        AssignmentOperator::Assign,
-                                        target,
-                                        r_ident.clone_in(ast.allocator),
+                                        VariableDeclarationKind::Var,
+                                        ast.binding_pattern_binding_identifier(
+                                            span,
+                                            ast.allocator.alloc_str("_ref$"),
+                                        ),
+                                        NONE,
+                                        Some(init_expr),
+                                        false,
+                                    );
+                                    Statement::VariableDeclaration(
+                                        ast.alloc_variable_declaration(
+                                            span,
+                                            VariableDeclarationKind::Var,
+                                            ast.vec1(declarator),
+                                            false,
+                                        ),
                                     )
-                                })
-                                .unwrap_or_else(|| ast.expression_identifier(SPAN, "undefined"));
+                                };
+                                body_stmts.push(var_decl);
 
-                            let conditional = ast.expression_conditional(span, test, call, assign);
-                            body_stmts.push(Statement::ExpressionStatement(
-                                ast.alloc_expression_statement(span, conditional),
-                            ));
+                                let ref_ident = ast.expression_identifier(span, "_ref$");
+                                let r_ident = ast.expression_identifier(span, "r$");
+                                let typeof_ref = ast.expression_unary(
+                                    span,
+                                    UnaryOperator::Typeof,
+                                    ref_ident.clone_in(ast.allocator),
+                                );
+                                let function_str = ast.expression_string_literal(
+                                    span,
+                                    ast.allocator.alloc_str("function"),
+                                    None,
+                                );
+                                let test = ast.expression_binary(
+                                    span,
+                                    typeof_ref,
+                                    BinaryOperator::StrictEquality,
+                                    function_str,
+                                );
 
-                            let body = ast.alloc_function_body(span, ast.vec(), body_stmts);
-                            let func = ast.expression_function(
-                                span,
-                                FunctionType::FunctionExpression,
-                                None,
-                                false,
-                                false,
-                                false,
-                                NONE,
-                                NONE,
-                                params,
-                                NONE,
-                                Some(body),
-                            );
+                                let call = {
+                                    let mut args = ast.vec_with_capacity(1);
+                                    args.push(Argument::from(r_ident.clone_in(ast.allocator)));
+                                    ast.expression_call(
+                                        span,
+                                        ref_ident.clone_in(ast.allocator),
+                                        None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+                                        args,
+                                        false,
+                                    )
+                                };
 
-                            dynamic_props.push(ast.object_property_kind_object_property(
-                                span,
-                                PropertyKind::Init,
-                                PropertyKey::StaticIdentifier(
-                                    ast.alloc_identifier_name(span, "ref"),
-                                ),
-                                func,
-                                true,  // method
-                                false, // shorthand
-                                false, // computed
-                            ));
+                                let assign =
+                                    expression_to_assignment_target(context.clone_expr(expr))
+                                        .map(|target| {
+                                            ast.expression_assignment(
+                                                span,
+                                                AssignmentOperator::Assign,
+                                                target,
+                                                r_ident.clone_in(ast.allocator),
+                                            )
+                                        })
+                                        .unwrap_or_else(|| {
+                                            ast.expression_identifier(SPAN, "undefined")
+                                        });
+
+                                let conditional =
+                                    ast.expression_conditional(span, test, call, assign);
+                                body_stmts.push(Statement::ExpressionStatement(
+                                    ast.alloc_expression_statement(span, conditional),
+                                ));
+
+                                let body =
+                                    ast.alloc_function_body(span, ast.vec(), body_stmts);
+                                let func = ast.expression_function(
+                                    span,
+                                    FunctionType::FunctionExpression,
+                                    None,
+                                    false,
+                                    false,
+                                    false,
+                                    NONE,
+                                    NONE,
+                                    params,
+                                    NONE,
+                                    Some(body),
+                                );
+
+                                dynamic_props.push(ast.object_property_kind_object_property(
+                                    span,
+                                    PropertyKind::Init,
+                                    PropertyKey::StaticIdentifier(
+                                        ast.alloc_identifier_name(span, "ref"),
+                                    ),
+                                    func,
+                                    true,  // method
+                                    false, // shorthand
+                                    false, // computed
+                                ));
+                            }
                         }
                     }
                     continue;
