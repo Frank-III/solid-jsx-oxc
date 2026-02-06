@@ -226,8 +226,25 @@ fn test_component_ref_const_identifier_passed_directly() {
         <Child ref={setRef}>content</Child>
         "#,
     );
+    eprintln!("=== Component ref const output ===\n{code}\n===");
     assert!(code.contains("ref: setRef"), "Expected direct ref pass, output was:\n{code}");
     assert!(!code.contains("typeof"), "Should not have typeof check for const ref, output was:\n{code}");
+}
+
+#[test]
+fn test_component_ref_signal_setter_realistic() {
+    // Realistic pattern from agents-sidebar.tsx
+    let code = transform_dom(
+        r#"
+        import { createSignal } from "solid-js";
+        const [searchInputRef, setSearchInputRef] = createSignal(null);
+        const Input = (p) => p;
+        <Input ref={setSearchInputRef} placeholder="Search" />
+        "#,
+    );
+    eprintln!("=== Realistic component ref output ===\n{code}\n===");
+    assert!(!code.contains("typeof"), "Should not have typeof check for const signal setter ref, output was:\n{code}");
+    assert!(!code.contains("setSearchInputRef ="), "Should not assign to const, output was:\n{code}");
 }
 
 #[test]

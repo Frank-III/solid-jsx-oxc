@@ -98,10 +98,15 @@ fn expression_to_assignment_target<'a>(expr: Expression<'a>) -> Option<Assignmen
             Some(AssignmentTarget::ComputedMemberExpression(m))
         }
         Expression::PrivateFieldExpression(m) => Some(AssignmentTarget::PrivateFieldExpression(m)),
-        Expression::TSAsExpression(e) => Some(AssignmentTarget::TSAsExpression(e)),
-        Expression::TSSatisfiesExpression(e) => Some(AssignmentTarget::TSSatisfiesExpression(e)),
-        Expression::TSNonNullExpression(e) => Some(AssignmentTarget::TSNonNullExpression(e)),
-        Expression::TSTypeAssertion(e) => Some(AssignmentTarget::TSTypeAssertion(e)),
+        // Strip TS type wrappers — the inner expression is the actual assignment target.
+        Expression::TSAsExpression(e) => expression_to_assignment_target(e.unbox().expression),
+        Expression::TSSatisfiesExpression(e) => {
+            expression_to_assignment_target(e.unbox().expression)
+        }
+        Expression::TSNonNullExpression(e) => {
+            expression_to_assignment_target(e.unbox().expression)
+        }
+        Expression::TSTypeAssertion(e) => expression_to_assignment_target(e.unbox().expression),
         _ => None,
     }
 }
