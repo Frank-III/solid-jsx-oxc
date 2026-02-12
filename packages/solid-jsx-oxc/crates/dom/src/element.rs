@@ -14,7 +14,7 @@ use oxc_syntax::symbol::SymbolFlags;
 use oxc_traverse::TraverseCtx;
 
 use common::{
-    constants::{ALIASES, DELEGATED_EVENTS, VOID_ELEMENTS},
+    constants::{DELEGATED_EVENTS, VOID_ELEMENTS},
     expression::{escape_html, to_event_name},
     get_attr_name, is_component, is_dynamic, is_namespaced_attr, is_svg_element, TransformOptions,
 };
@@ -351,7 +351,7 @@ fn transform_attribute<'a>(
         return;
     }
 
-    if key.starts_with("on") {
+    if key.starts_with("on:") || (key.starts_with("on") && !key.contains(':')) {
         let elem_id = elem_id.expect("event handlers require an element id");
         transform_event(attr, &key, elem_id, result, context, options);
         return;
@@ -367,13 +367,6 @@ fn transform_attribute<'a>(
     if key.starts_with("prop:") {
         let elem_id = elem_id.expect("prop: requires an element id");
         transform_prop(attr, &key, elem_id, result, context);
-        return;
-    }
-
-    // Handle attr: prefix - force attribute mode
-    if key.starts_with("attr:") {
-        let elem_id = elem_id.expect("attr: requires an element id");
-        transform_attr(attr, &key, elem_id, result, context);
         return;
     }
 
@@ -408,15 +401,19 @@ fn transform_attribute<'a>(
     match &attr.value {
         Some(JSXAttributeValue::StringLiteral(lit)) => {
             // Static string attribute - inline in template
-            let attr_key = ALIASES.get(key.as_str()).copied().unwrap_or(key.as_str());
             let escaped = escape_html(&lit.value, true);
-            result
-                .template
-                .push_str(&format!(" {}=\"{}\"", attr_key, escaped));
+            result.template.push_str(&format!(" {}=\"{}\"", key, escaped));
         }
         Some(JSXAttributeValue::ExpressionContainer(container)) => {
             // Dynamic attribute - needs effect
             if let Some(expr) = container.expression.as_expression() {
+                if let Expression::BooleanLiteral(bool_lit) = expr {
+                    if bool_lit.value {
+                        result.template.push_str(&format!(" {}", key));
+                    }
+                    return;
+                }
+
                 if is_dynamic(expr) {
                     // Dynamic - wrap in effect
                     let elem_id = elem_id.expect("dynamic attributes require an element id");
@@ -706,41 +703,6 @@ fn transform_prop<'a>(
                 result.exprs.push(assign);
             }
         }
-    }
-}
-
-/// Transform attr: prefix (force attribute mode via setAttribute)
-fn transform_attr<'a>(
-    attr: &JSXAttribute<'a>,
-    key: &str,
-    elem_id: &str,
-    result: &mut TransformResult<'a>,
-    context: &BlockContext<'a>,
-) {
-    let ast = context.ast();
-    let attr_name = &key[5..]; // Strip "attr:"
-
-    if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
-        if let Some(expr) = container.expression.as_expression() {
-            context.register_helper("effect");
-            context.register_helper("setAttribute");
-            let elem = ident_expr(ast, attr.span, elem_id);
-            let set_attr = static_member(ast, attr.span, elem, "setAttribute");
-            let name =
-                ast.expression_string_literal(SPAN, ast.allocator.alloc_str(attr_name), None);
-            let call = call_expr(ast, attr.span, set_attr, [name, context.clone_expr(expr)]);
-            let arrow = arrow_zero_params_return_expr(ast, attr.span, call);
-            let effect = ident_expr(ast, attr.span, "effect");
-            result
-                .exprs
-                .push(call_expr(ast, attr.span, effect, [arrow]));
-        }
-    } else if let Some(JSXAttributeValue::StringLiteral(lit)) = &attr.value {
-        // Static value - inline in template
-        let escaped = escape_html(&lit.value, true);
-        result
-            .template
-            .push_str(&format!(" {}=\"{}\"", attr_name, escaped));
     }
 }
 

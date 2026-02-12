@@ -159,8 +159,8 @@ pub fn build_dom_output_expr<'a>(
             context.register_helper("effect");
             if binding.key == "style" {
                 context.register_helper("style");
-            } else if binding.key == "classList" {
-                context.register_helper("classList");
+            } else if binding.key == "class" {
+                context.register_helper("className");
             } else {
                 context.register_helper("setAttribute");
             }
