@@ -5,38 +5,10 @@ use phf::{phf_set, Set};
 
 /// Properties that should be set as DOM properties rather than attributes
 pub static PROPERTIES: Set<&'static str> = phf_set! {
-    "className",
     "value",
-    "readOnly",
-    "formNoValidate",
-    "isMap",
-    "noModule",
-    "playsInline",
-    "allowfullscreen",
-    "async",
-    "autofocus",
-    "autoplay",
     "checked",
-    "controls",
-    "default",
-    "disabled",
-    "formnovalidate",
-    "hidden",
-    "indeterminate",
-    "inert",
-    "ismap",
-    "loop",
-    "multiple",
-    "muted",
-    "nomodule",
-    "novalidate",
-    "open",
-    "playsinline",
-    "readonly",
-    "required",
-    "reversed",
-    "seamless",
     "selected",
+    "muted",
 };
 
 /// Child properties that affect children
@@ -49,8 +21,6 @@ pub static CHILD_PROPERTIES: Set<&'static str> = phf_set! {
 
 /// Attribute aliases (JSX name -> DOM name)
 pub static ALIASES: phf::Map<&'static str, &'static str> = phf::phf_map! {
-    "className" => "class",
-    "htmlFor" => "for",
 };
 
 /// Events that can be delegated (bubbling events)
