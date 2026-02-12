@@ -94,6 +94,22 @@ fn test_dom_boolean_attribute() {
     assert!(code.contains("disabled"));
 }
 
+#[test]
+fn test_dom_class_namespace_binding() {
+    let code = transform_dom(r#"<div class:my-class={props.active} />"#);
+    assert!(code.contains("classList.toggle"));
+    assert!(code.contains("\"my-class\""));
+    assert!(code.contains("props.active"));
+}
+
+#[test]
+fn test_dom_style_namespace_binding() {
+    let code = transform_dom(r#"<div style:padding-top={props.top} />"#);
+    assert!(code.contains("setStyleProperty"));
+    assert!(code.contains("\"padding-top\""));
+    assert!(code.contains("props.top"));
+}
+
 // ============================================================================
 // DOM: Event Handlers
 // ============================================================================

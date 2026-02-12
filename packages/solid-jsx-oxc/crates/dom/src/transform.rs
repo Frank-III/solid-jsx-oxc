@@ -443,7 +443,7 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
                 raw: ast.atom(part_str),
                 cooked: Some(ast.atom(part_str)),
             };
-            quasis.push(ast.template_element(tmpl_span, value, true));
+            quasis.push(ast.template_element(tmpl_span, value, true, true));
             let template_lit = ast.template_literal(tmpl_span, quasis, ast.vec());
             let template_expr = Expression::TemplateLiteral(ast.alloc(template_lit));
 
