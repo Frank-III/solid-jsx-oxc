@@ -311,6 +311,26 @@ fn test_dom_does_not_duplicate_mergeprops_from_solid_js() {
     );
 }
 
+#[test]
+fn test_dom_namespace_import_from_solid_web_adds_separate_helper_import() {
+    let code = transform_dom(
+        r#"
+        import * as Solid from "solid-js/web";
+        <div>{count()}</div>
+        "#,
+    );
+
+    assert!(
+        !code.contains("* as Solid, {") && !code.contains("* as Solid , {"),
+        "Should not merge named helpers into namespace import. Output was:\n{code}"
+    );
+    assert_eq!(
+        code.matches("solid-js/web").count(),
+        2,
+        "Expected namespace import + separate helper import. Output was:\n{code}"
+    );
+}
+
 // ============================================================================
 // DOM: Style
 // ============================================================================
@@ -803,6 +823,26 @@ fn test_ssr_imports() {
     assert!(code.contains("import"));
     assert!(code.contains("ssr"));
     assert!(code.contains("escape"));
+}
+
+#[test]
+fn test_ssr_namespace_import_from_solid_web_adds_separate_helper_import() {
+    let code = transform_ssr(
+        r#"
+        import * as Solid from "solid-js/web";
+        <div>{count()}</div>
+        "#,
+    );
+
+    assert!(
+        !code.contains("* as Solid, {") && !code.contains("* as Solid , {"),
+        "Should not merge named helpers into namespace import. Output was:\n{code}"
+    );
+    assert_eq!(
+        code.matches("solid-js/web").count(),
+        2,
+        "Expected namespace import + separate helper import. Output was:\n{code}"
+    );
 }
 
 #[test]

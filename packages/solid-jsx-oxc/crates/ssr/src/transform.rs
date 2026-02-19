@@ -179,7 +179,7 @@ impl<'a> Traverse<'a, ()> for SSRTransform<'a> {
         // We check ALL imports (not just from module_name) because helpers like
         // `mergeProps` can be imported from either `solid-js` or `solid-js/web`.
         let mut existing_helper_locals = std::collections::HashSet::<String>::new();
-        let mut first_module_import_index: Option<usize> = None;
+        let mut first_augmentable_module_import_index: Option<usize> = None;
         for (i, stmt) in program.body.iter().enumerate() {
             let Statement::ImportDeclaration(import_decl) = stmt else {
                 continue;
@@ -190,12 +190,21 @@ impl<'a> Traverse<'a, ()> for SSRTransform<'a> {
 
             let is_target_module = import_decl.source.value.as_str() == module_name;
 
-            // Track first import from target module for augmentation
-            if is_target_module
-                && first_module_import_index.is_none()
-                && import_decl.specifiers.is_some()
-            {
-                first_module_import_index = Some(i);
+            // Track first import from target module that can be legally augmented.
+            // Namespace imports cannot be combined with named imports:
+            // `import * as Solid, { ssr } from "...";` is invalid JS.
+            if is_target_module && first_augmentable_module_import_index.is_none() {
+                if let Some(specifiers) = &import_decl.specifiers {
+                    let has_namespace_specifier = specifiers.iter().any(|spec| {
+                        matches!(
+                            spec,
+                            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_)
+                        )
+                    });
+                    if !has_namespace_specifier {
+                        first_augmentable_module_import_index = Some(i);
+                    }
+                }
             }
 
             // Collect ALL import bindings to avoid duplicate declarations
@@ -233,7 +242,7 @@ impl<'a> Traverse<'a, ()> for SSRTransform<'a> {
         }
 
         // Prefer augmenting the first existing import from the module to avoid extra imports.
-        if let Some(import_index) = first_module_import_index {
+        if let Some(import_index) = first_augmentable_module_import_index {
             if let Statement::ImportDeclaration(import_decl) = &mut program.body[import_index] {
                 let decl_specifiers = import_decl.specifiers.get_or_insert_with(|| ast.vec());
                 decl_specifiers.extend(specifiers);
