@@ -1,5 +1,8 @@
 import type { Plugin, FilterPattern } from 'vite';
 import { createFilter } from 'vite';
+import { createRequire } from 'node:module';
+import { dirname, isAbsolute, resolve as resolvePath } from 'node:path';
+import { readFileSync } from 'node:fs';
 
 // Will be imported from the NAPI bindings
 // import { transform } from 'solid-jsx-oxc';
@@ -107,27 +110,96 @@ const defaultOptions: SolidOxcOptions = {
   ],
 };
 
+const BARE_IMPORT_RE = /^[^./]|^\.[^./]|^\.\.[^/]/;
+const EXPORT_CONDITION_PREFERENCE = ['solid', 'default', 'development', 'production'] as const;
+
+function parsePackageSpecifier(source: string): { packageName: string; subpath: string } | null {
+  if (!BARE_IMPORT_RE.test(source)) {
+    return null;
+  }
+
+  if (source.startsWith('@')) {
+    const [scope, name, ...rest] = source.split('/');
+    if (!scope || !name) return null;
+    return {
+      packageName: `${scope}/${name}`,
+      subpath: rest.length > 0 ? `./${rest.join('/')}` : '.',
+    };
+  }
+
+  const [name, ...rest] = source.split('/');
+  if (!name) return null;
+  return {
+    packageName: name,
+    subpath: rest.length > 0 ? `./${rest.join('/')}` : '.',
+  };
+}
+
+function pickExportTarget(entry: unknown): string | null {
+  if (typeof entry === 'string') {
+    return entry;
+  }
+
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+
+  const record = entry as Record<string, unknown>;
+  for (const key of EXPORT_CONDITION_PREFERENCE) {
+    if (key in record) {
+      const picked = pickExportTarget(record[key]);
+      if (picked) return picked;
+    }
+  }
+
+  for (const value of Object.values(record)) {
+    const picked = pickExportTarget(value);
+    if (picked) return picked;
+  }
+
+  return null;
+}
+
 /**
  * Vite plugin for SolidJS using OXC-based compiler
  */
 export default function solidOxc(options: SolidOxcOptions = {}): Plugin {
   const opts = { ...defaultOptions, ...options };
   const filter = createFilter(opts.include, opts.exclude);
+  const packageJsonCache = new Map<string, unknown>();
 
   let isDev = false;
-  let isSSR = false;
+  let buildSSR = false;
 
   // Lazy load the native module
   let solidJsxOxc: typeof import('solid-jsx-oxc') | null = null;
 
   return {
     name: 'vite-plugin-solid-oxc',
+    sharedDuringBuild: false,
 
     enforce: 'pre',
 
+    configEnvironment(_name, config) {
+      if (!opts.solid_condition) {
+        return;
+      }
+
+      const conditions = config.resolve?.conditions ?? [];
+      if (conditions.includes('solid')) {
+        return;
+      }
+
+      return {
+        resolve: {
+          conditions: ['solid', ...conditions],
+        },
+      };
+    },
+
     configResolved(config) {
       isDev = config.command === 'serve';
-      isSSR = opts.ssr ?? (typeof config.build?.ssr === 'boolean' ? config.build.ssr : !!config.build?.ssr);
+      buildSSR = typeof config.build?.ssr === 'boolean' ? config.build.ssr : !!config.build?.ssr;
     },
 
     async buildStart() {
@@ -142,7 +214,93 @@ export default function solidOxc(options: SolidOxcOptions = {}): Plugin {
       }
     },
 
-    async transform(code, id) {
+    async resolveId(source, importer, options) {
+      if (!opts.solid_condition) {
+        return null;
+      }
+
+      if (!options?.ssr || this.environment?.config?.consumer !== 'server') {
+        return null;
+      }
+
+      if (!BARE_IMPORT_RE.test(source)) {
+        return null;
+      }
+
+      const ssrResolved = await this.resolve(source, importer, { ...options, skipSelf: true });
+      if (ssrResolved && ssrResolved.id !== source && !ssrResolved.external) {
+        return null;
+      }
+
+      const parsed = parsePackageSpecifier(source);
+      if (!parsed) {
+        return null;
+      }
+
+      const resolverBase =
+        importer && (isAbsolute(importer) || importer.startsWith('file://'))
+          ? importer
+          : resolvePath(process.cwd(), '__vite_plugin_solid_oxc__.js');
+      const resolver = createRequire(resolverBase);
+
+      let packageJsonPath: string;
+      try {
+        packageJsonPath = resolver.resolve(`${parsed.packageName}/package.json`);
+      } catch {
+        return null;
+      }
+
+      let packageJson = packageJsonCache.get(packageJsonPath);
+      if (!packageJson) {
+        try {
+          packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as unknown;
+          packageJsonCache.set(packageJsonPath, packageJson);
+        } catch {
+          return null;
+        }
+      }
+
+      const exportsField =
+        packageJson && typeof packageJson === 'object' && 'exports' in packageJson
+          ? (packageJson as { exports: unknown }).exports
+          : undefined;
+      if (!exportsField) {
+        return null;
+      }
+
+      let exportEntry: unknown;
+      if (parsed.subpath === '.') {
+        exportEntry =
+          typeof exportsField === 'object' && exportsField !== null && '.' in (exportsField as Record<string, unknown>)
+            ? (exportsField as Record<string, unknown>)['.']
+            : exportsField;
+      } else {
+        exportEntry =
+          typeof exportsField === 'object' && exportsField !== null
+            ? (exportsField as Record<string, unknown>)[parsed.subpath]
+            : undefined;
+      }
+
+      const solidTarget = pickExportTarget(exportEntry);
+      if (!solidTarget) {
+        return null;
+      }
+
+      const normalized = solidTarget.replace(/^\.\/+/, '');
+      const resolvedId = resolvePath(dirname(packageJsonPath), normalized);
+
+      if (
+        !resolvedId.includes('/dist/source/') &&
+        !resolvedId.endsWith('.jsx') &&
+        !resolvedId.endsWith('.tsx')
+      ) {
+        return null;
+      }
+
+      return { id: resolvedId };
+    },
+
+    async transform(code, id, transformOptions) {
       const fileId = id.split('?', 1)[0];
 
       if (!filter(fileId)) {
@@ -154,7 +312,20 @@ export default function solidOxc(options: SolidOxcOptions = {}): Plugin {
         return null;
       }
 
-      const generate = isSSR ? 'ssr' : opts.generate;
+      const envName = (this as unknown as { environment?: { name?: string; config?: { consumer?: string } } })
+        .environment?.name;
+      const envConsumer = (this as unknown as { environment?: { name?: string; config?: { consumer?: string } } })
+        .environment?.config?.consumer;
+      const inferredSSR =
+        envConsumer === 'server' ||
+        envName === 'ssr' ||
+        envName === 'nitro' ||
+        envName === 'server' ||
+        envName === 'worker';
+      const transformSSR =
+        opts.ssr ??
+        (typeof transformOptions?.ssr === 'boolean' ? transformOptions.ssr : inferredSSR || buildSSR);
+      const generate = transformSSR ? 'ssr' : opts.generate;
 
       try {
         const result = solidJsxOxc.transformJsx(code, {

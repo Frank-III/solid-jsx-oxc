@@ -123,7 +123,9 @@ impl<'a> SemanticLintRunner<'a> {
     /// Resolve an identifier name in the current scope
     #[allow(dead_code)]
     fn resolve_in_current_scope(&self, name: &str) -> Option<SymbolId> {
-        self.semantic.scoping().find_binding(self.current_scope(), name)
+        self.semantic
+            .scoping()
+            .find_binding(self.current_scope(), name.into())
     }
 
     /// Check if we're inside a JSX expression context
@@ -223,7 +225,7 @@ impl<'a> SemanticLintRunner<'a> {
         is_component: bool,
     ) {
         let scoping = self.semantic.scoping();
-        let symbol_id = scoping.find_binding(scope_id, name);
+        let symbol_id = scoping.find_binding(scope_id, name.into());
 
         if let Some(symbol_id) = symbol_id {
             // jsx-uses-vars: mark as used

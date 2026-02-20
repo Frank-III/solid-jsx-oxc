@@ -359,17 +359,15 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
                 let is_target_module = import_decl.source.value.as_str() == module_name;
 
                 // Track first import from target module that can be legally augmented.
-                // Namespace imports cannot be combined with named imports:
-                // `import * as Solid, { template } from "...";` is invalid JS.
+                // Only pure named imports are safe to augment. Mixing named with namespace
+                // (and in some toolchains default/namespace variants) can emit invalid JS.
                 if is_target_module && first_augmentable_module_import_index.is_none() {
                     if let Some(specifiers) = &import_decl.specifiers {
-                        let has_namespace_specifier = specifiers.iter().any(|spec| {
-                            matches!(
-                                spec,
-                                ImportDeclarationSpecifier::ImportNamespaceSpecifier(_)
-                            )
-                        });
-                        if !has_namespace_specifier {
+                        let all_named_specifiers = !specifiers.is_empty()
+                            && specifiers.iter().all(|spec| {
+                                matches!(spec, ImportDeclarationSpecifier::ImportSpecifier(_))
+                            });
+                        if all_named_specifiers {
                             first_augmentable_module_import_index = Some(i);
                         }
                     }
@@ -452,7 +450,7 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
                 raw: ast.atom(part_str),
                 cooked: Some(ast.atom(part_str)),
             };
-            quasis.push(ast.template_element(tmpl_span, value, true));
+            quasis.push(ast.template_element(tmpl_span, value, true, true));
             let template_lit = ast.template_literal(tmpl_span, quasis, ast.vec());
             let template_expr = Expression::TemplateLiteral(ast.alloc(template_lit));
 

@@ -202,7 +202,7 @@ impl<'a> SSRResult<'a> {
                 raw: ast.atom(part_str),
                 cooked: Some(ast.atom(part_str)),
             };
-            let element = ast.template_element(gen_span, value, is_tail);
+            let element = ast.template_element(gen_span, value, is_tail, true);
             quasis.push(element);
         }
 

@@ -30,6 +30,7 @@ pub use event_handlers::EventHandlers;
 pub use imports::Imports;
 pub use jsx_no_duplicate_props::JsxNoDuplicateProps;
 pub use jsx_no_script_url::JsxNoScriptUrl;
+pub use jsx_no_undef::JsxNoUndef;
 pub use jsx_uses_vars::JsxUsesVars;
 pub use no_array_handlers::NoArrayHandlers;
 pub use no_destructure::NoDestructure;

@@ -94,6 +94,22 @@ fn test_dom_boolean_attribute() {
     assert!(code.contains("disabled"));
 }
 
+#[test]
+fn test_dom_class_namespace_binding() {
+    let code = transform_dom(r#"<div class:my-class={props.active} />"#);
+    assert!(code.contains("classList.toggle"));
+    assert!(code.contains("\"my-class\""));
+    assert!(code.contains("props.active"));
+}
+
+#[test]
+fn test_dom_style_namespace_binding() {
+    let code = transform_dom(r#"<div style:padding-top={props.top} />"#);
+    assert!(code.contains("setStyleProperty"));
+    assert!(code.contains("\"padding-top\""));
+    assert!(code.contains("props.top"));
+}
+
 // ============================================================================
 // DOM: Event Handlers
 // ============================================================================
@@ -831,6 +847,27 @@ fn test_ssr_namespace_import_from_solid_web_adds_separate_helper_import() {
         r#"
         import * as Solid from "solid-js/web";
         <div>{count()}</div>
+        "#,
+    );
+
+    assert!(
+        !code.contains("* as Solid, {") && !code.contains("* as Solid , {"),
+        "Should not merge named helpers into namespace import. Output was:\n{code}"
+    );
+    assert_eq!(
+        code.matches("solid-js/web").count(),
+        2,
+        "Expected namespace import + separate helper import. Output was:\n{code}"
+    );
+}
+
+#[test]
+fn test_ssr_namespace_import_with_member_usage_keeps_separate_helper_import() {
+    let code = transform_ssr(
+        r#"
+        import * as Solid from "solid-js/web";
+        const docType = Solid.ssr("<!DOCTYPE html>");
+        const stream = () => <>{docType}{children()}</>;
         "#,
     );
 

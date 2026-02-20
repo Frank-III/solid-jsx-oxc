@@ -52,7 +52,7 @@ impl RuleMeta for JsxNoUndef {
 
 /// Information about an undefined identifier
 #[derive(Debug)]
-struct UndefinedIdent {
+pub struct UndefinedIdent {
     name: String,
     span: Span,
     is_component: bool,
@@ -147,13 +147,13 @@ impl JsxNoUndef {
     /// Check if an identifier is defined in scope
     fn is_defined(&self, scoping: &Scoping, scope_id: ScopeId, name: &str) -> bool {
         // Check local/module scopes
-        if scoping.find_binding(scope_id, name).is_some() {
+        if scoping.find_binding(scope_id, name.into()).is_some() {
             return true;
         }
 
         // Check global scope if allowed
         if self.options.allow_globals {
-            if scoping.get_root_binding(name).is_some() {
+            if scoping.get_root_binding(name.into()).is_some() {
                 return true;
             }
         }
