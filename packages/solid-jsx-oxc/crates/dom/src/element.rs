@@ -14,7 +14,7 @@ use oxc_syntax::symbol::SymbolFlags;
 use oxc_traverse::TraverseCtx;
 
 use common::{
-    constants::{ALIASES, DELEGATED_EVENTS, VOID_ELEMENTS},
+    constants::{DELEGATED_EVENTS, VOID_ELEMENTS},
     expression::{escape_html, to_event_name},
     get_attr_name, is_component, is_dynamic, is_namespaced_attr, is_svg_element, TransformOptions,
 };
@@ -58,6 +58,39 @@ fn call_expr<'a>(
         arguments,
         false,
     )
+}
+
+fn bool_cast_expr<'a>(ast: AstBuilder<'a>, span: Span, expr: Expression<'a>) -> Expression<'a> {
+    let _ = span;
+    let not_expr = ast.expression_unary(SPAN, UnaryOperator::LogicalNot, expr);
+    ast.expression_unary(SPAN, UnaryOperator::LogicalNot, not_expr)
+}
+
+fn class_toggle_expr<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    elem_id: &str,
+    class_name: &str,
+    value: Expression<'a>,
+) -> Expression<'a> {
+    let elem = ident_expr(ast, span, elem_id);
+    let class_list = static_member(ast, span, elem, "classList");
+    let toggle = static_member(ast, span, class_list, "toggle");
+    let class_name_lit = ast.expression_string_literal(SPAN, ast.allocator.alloc_str(class_name), None);
+    call_expr(ast, span, toggle, [class_name_lit, value])
+}
+
+fn set_style_property_expr<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    elem_id: &str,
+    prop_name: &str,
+    value: Expression<'a>,
+) -> Expression<'a> {
+    let callee = ident_expr(ast, span, "setStyleProperty");
+    let elem = ident_expr(ast, span, elem_id);
+    let prop_name_lit = ast.expression_string_literal(SPAN, ast.allocator.alloc_str(prop_name), None);
+    call_expr(ast, span, callee, [elem, prop_name_lit, value])
 }
 
 fn arrow_zero_params_return_expr<'a>(
@@ -318,7 +351,7 @@ fn transform_attribute<'a>(
         return;
     }
 
-    if key.starts_with("on") {
+    if key.starts_with("on:") || (key.starts_with("on") && !key.contains(':')) {
         let elem_id = elem_id.expect("event handlers require an element id");
         transform_event(attr, &key, elem_id, result, context, options);
         return;
@@ -337,10 +370,17 @@ fn transform_attribute<'a>(
         return;
     }
 
-    // Handle attr: prefix - force attribute mode
-    if key.starts_with("attr:") {
-        let elem_id = elem_id.expect("attr: requires an element id");
-        transform_attr(attr, &key, elem_id, result, context);
+    // Handle class: prefix - classList.toggle() behavior
+    if key.starts_with("class:") {
+        let elem_id = elem_id.expect("class: requires an element id");
+        transform_class_namespace(attr, &key, elem_id, result, context);
+        return;
+    }
+
+    // Handle style: prefix - setStyleProperty() behavior
+    if key.starts_with("style:") {
+        let elem_id = elem_id.expect("style: requires an element id");
+        transform_style_namespace(attr, &key, elem_id, result, context);
         return;
     }
 
@@ -361,15 +401,19 @@ fn transform_attribute<'a>(
     match &attr.value {
         Some(JSXAttributeValue::StringLiteral(lit)) => {
             // Static string attribute - inline in template
-            let attr_key = ALIASES.get(key.as_str()).copied().unwrap_or(key.as_str());
             let escaped = escape_html(&lit.value, true);
-            result
-                .template
-                .push_str(&format!(" {}=\"{}\"", attr_key, escaped));
+            result.template.push_str(&format!(" {}=\"{}\"", key, escaped));
         }
         Some(JSXAttributeValue::ExpressionContainer(container)) => {
             // Dynamic attribute - needs effect
             if let Some(expr) = container.expression.as_expression() {
+                if let Expression::BooleanLiteral(bool_lit) = expr {
+                    if bool_lit.value {
+                        result.template.push_str(&format!(" {}", key));
+                    }
+                    return;
+                }
+
                 if is_dynamic(expr) {
                     // Dynamic - wrap in effect
                     let elem_id = elem_id.expect("dynamic attributes require an element id");
@@ -662,8 +706,8 @@ fn transform_prop<'a>(
     }
 }
 
-/// Transform attr: prefix (force attribute mode via setAttribute)
-fn transform_attr<'a>(
+/// Transform class: prefix (maps to classList.toggle)
+fn transform_class_namespace<'a>(
     attr: &JSXAttribute<'a>,
     key: &str,
     elem_id: &str,
@@ -671,29 +715,90 @@ fn transform_attr<'a>(
     context: &BlockContext<'a>,
 ) {
     let ast = context.ast();
-    let attr_name = &key[5..]; // Strip "attr:"
+    let class_name = &key[6..]; // Strip "class:"
 
-    if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
-        if let Some(expr) = container.expression.as_expression() {
-            context.register_helper("effect");
-            context.register_helper("setAttribute");
-            let elem = ident_expr(ast, attr.span, elem_id);
-            let set_attr = static_member(ast, attr.span, elem, "setAttribute");
-            let name =
-                ast.expression_string_literal(SPAN, ast.allocator.alloc_str(attr_name), None);
-            let call = call_expr(ast, attr.span, set_attr, [name, context.clone_expr(expr)]);
-            let arrow = arrow_zero_params_return_expr(ast, attr.span, call);
-            let effect = ident_expr(ast, attr.span, "effect");
+    match &attr.value {
+        Some(JSXAttributeValue::ExpressionContainer(container)) => {
+            if let Some(expr) = container.expression.as_expression() {
+                let toggle_expr = class_toggle_expr(
+                    ast,
+                    attr.span,
+                    elem_id,
+                    class_name,
+                    bool_cast_expr(ast, attr.span, context.clone_expr(expr)),
+                );
+
+                if is_dynamic(expr) {
+                    context.register_helper("effect");
+                    let effect = ident_expr(ast, attr.span, "effect");
+                    let arrow = arrow_zero_params_return_expr(ast, attr.span, toggle_expr);
+                    result
+                        .exprs
+                        .push(call_expr(ast, attr.span, effect, [arrow]));
+                } else {
+                    result.exprs.push(toggle_expr);
+                }
+            }
+        }
+        Some(JSXAttributeValue::StringLiteral(lit)) => {
+            let truthy = ast.expression_boolean_literal(SPAN, !lit.value.is_empty());
             result
                 .exprs
-                .push(call_expr(ast, attr.span, effect, [arrow]));
+                .push(class_toggle_expr(ast, attr.span, elem_id, class_name, truthy));
         }
-    } else if let Some(JSXAttributeValue::StringLiteral(lit)) = &attr.value {
-        // Static value - inline in template
-        let escaped = escape_html(&lit.value, true);
-        result
-            .template
-            .push_str(&format!(" {}=\"{}\"", attr_name, escaped));
+        None => {
+            let truthy = ast.expression_boolean_literal(SPAN, true);
+            result
+                .exprs
+                .push(class_toggle_expr(ast, attr.span, elem_id, class_name, truthy));
+        }
+        _ => {}
+    }
+}
+
+/// Transform style: prefix (maps to setStyleProperty)
+fn transform_style_namespace<'a>(
+    attr: &JSXAttribute<'a>,
+    key: &str,
+    elem_id: &str,
+    result: &mut TransformResult<'a>,
+    context: &BlockContext<'a>,
+) {
+    let ast = context.ast();
+    let prop_name = &key[6..]; // Strip "style:"
+    context.register_helper("setStyleProperty");
+
+    match &attr.value {
+        Some(JSXAttributeValue::ExpressionContainer(container)) => {
+            if let Some(expr) = container.expression.as_expression() {
+                let set_prop = set_style_property_expr(
+                    ast,
+                    attr.span,
+                    elem_id,
+                    prop_name,
+                    context.clone_expr(expr),
+                );
+
+                if is_dynamic(expr) {
+                    context.register_helper("effect");
+                    let effect = ident_expr(ast, attr.span, "effect");
+                    let arrow = arrow_zero_params_return_expr(ast, attr.span, set_prop);
+                    result
+                        .exprs
+                        .push(call_expr(ast, attr.span, effect, [arrow]));
+                } else {
+                    result.exprs.push(set_prop);
+                }
+            }
+        }
+        Some(JSXAttributeValue::StringLiteral(lit)) => {
+            let value =
+                ast.expression_string_literal(SPAN, ast.allocator.alloc_str(&lit.value), None);
+            result.exprs.push(set_style_property_expr(
+                ast, attr.span, elem_id, prop_name, value,
+            ));
+        }
+        _ => {}
     }
 }
 

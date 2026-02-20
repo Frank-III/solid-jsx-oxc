@@ -68,7 +68,7 @@ fn test_dom_self_closing() {
 fn test_dom_dynamic_class() {
     let code = transform_dom(r#"<div class={style()}>content</div>"#);
     assert!(code.contains("effect"));
-    assert!(code.contains("setAttribute"));
+    assert!(code.contains("className"));
     assert!(code.contains("style()"));
 }
 
@@ -92,6 +92,46 @@ fn test_dom_mixed_static_dynamic() {
 fn test_dom_boolean_attribute() {
     let code = transform_dom(r#"<input disabled />"#);
     assert!(code.contains("disabled"));
+}
+
+#[test]
+fn test_dom_class_namespace_binding() {
+    let code = transform_dom(r#"<div class:my-class={props.active} />"#);
+    assert!(code.contains("classList.toggle"));
+    assert!(code.contains("\"my-class\""));
+    assert!(code.contains("props.active"));
+}
+
+#[test]
+fn test_dom_style_namespace_binding() {
+    let code = transform_dom(r#"<div style:padding-top={props.top} />"#);
+    assert!(code.contains("setStyleProperty"));
+    assert!(code.contains("\"padding-top\""));
+    assert!(code.contains("props.top"));
+}
+
+#[test]
+fn test_dom_classname_not_aliased_to_class() {
+    let code = transform_dom(r#"<div className={c()} />"#);
+    assert!(code.contains("\"className\""));
+    assert!(!code.contains("className(_el$"), "className prop should not use class helper: {code}");
+}
+
+#[test]
+fn test_dom_attr_namespace_not_special_cased() {
+    let code = transform_dom(r#"<div attr:role={role()} />"#);
+    assert!(code.contains("\"attr:role\""));
+    assert!(!code.contains("\"role\""), "attr: namespace should not be stripped: {code}");
+}
+
+#[test]
+fn test_dom_oncapture_namespace_not_event_handler() {
+    let code = transform_dom(r#"<div oncapture:foo={handler} />"#);
+    assert!(code.contains("\"oncapture:foo\""));
+    assert!(
+        !code.contains("addEventListener") && !code.contains("$$foo"),
+        "oncapture: namespace should not generate event wiring: {code}"
+    );
 }
 
 // ============================================================================

@@ -48,39 +48,25 @@ pub fn generate_set_attr_expr<'a>(
     let value = binding.value.clone_in(ast.allocator);
 
     // Handle special cases
-    if key == "class" || key == "className" {
-        if binding.is_svg {
-            let set_attr = static_member(ast, span, elem, "setAttribute");
-            let name = ast.expression_string_literal(span, ast.allocator.alloc_str("class"), None);
-            return ast.expression_call(
-                span,
-                set_attr,
-                None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
-                ast.vec_from_array([name.into(), value.into()]),
-                false,
-            );
-        }
-
-        let member = static_member(ast, span, elem, "className");
-        if let Some(target) = expression_to_assignment_target(member) {
-            return ast.expression_assignment(span, AssignmentOperator::Assign, target, value);
-        }
-        return ast.expression_identifier(span, "undefined");
-    }
-
-    if key == "style" {
-        let callee = ident_expr(ast, span, "style");
+    if key == "class" {
+        let callee = ident_expr(ast, span, "className");
+        let args = if binding.is_svg {
+            let is_svg = ast.expression_boolean_literal(span, true);
+            ast.vec_from_array([elem.into(), value.into(), is_svg.into()])
+        } else {
+            ast.vec_from_array([elem.into(), value.into()])
+        };
         return ast.expression_call(
             span,
             callee,
             None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
-            ast.vec_from_array([elem.into(), value.into()]),
+            args,
             false,
         );
     }
 
-    if key == "classList" {
-        let callee = ident_expr(ast, span, "classList");
+    if key == "style" {
+        let callee = ident_expr(ast, span, "style");
         return ast.expression_call(
             span,
             callee,
