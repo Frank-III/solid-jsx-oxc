@@ -138,14 +138,20 @@ fn test_dom_style_namespace_binding() {
 fn test_dom_classname_not_aliased_to_class() {
     let code = transform_dom(r#"<div className={c()} />"#);
     assert!(code.contains("\"className\""));
-    assert!(!code.contains("className(_el$"), "className prop should not use class helper: {code}");
+    assert!(
+        !code.contains("className(_el$"),
+        "className prop should not use class helper: {code}"
+    );
 }
 
 #[test]
 fn test_dom_attr_namespace_not_special_cased() {
     let code = transform_dom(r#"<div attr:role={role()} />"#);
     assert!(code.contains("\"attr:role\""));
-    assert!(!code.contains("\"role\""), "attr: namespace should not be stripped: {code}");
+    assert!(
+        !code.contains("\"role\""),
+        "attr: namespace should not be stripped: {code}"
+    );
 }
 
 #[test]
@@ -301,8 +307,14 @@ fn test_component_ref_const_identifier_passed_directly() {
         "#,
     );
     eprintln!("=== Component ref const output ===\n{code}\n===");
-    assert!(code.contains("ref: setRef"), "Expected direct ref pass, output was:\n{code}");
-    assert!(!code.contains("typeof"), "Should not have typeof check for const ref, output was:\n{code}");
+    assert!(
+        code.contains("ref: setRef"),
+        "Expected direct ref pass, output was:\n{code}"
+    );
+    assert!(
+        !code.contains("typeof"),
+        "Should not have typeof check for const ref, output was:\n{code}"
+    );
 }
 
 #[test]
@@ -317,8 +329,14 @@ fn test_component_ref_signal_setter_realistic() {
         "#,
     );
     eprintln!("=== Realistic component ref output ===\n{code}\n===");
-    assert!(!code.contains("typeof"), "Should not have typeof check for const signal setter ref, output was:\n{code}");
-    assert!(!code.contains("setSearchInputRef ="), "Should not assign to const, output was:\n{code}");
+    assert!(
+        !code.contains("typeof"),
+        "Should not have typeof check for const signal setter ref, output was:\n{code}"
+    );
+    assert!(
+        !code.contains("setSearchInputRef ="),
+        "Should not assign to const, output was:\n{code}"
+    );
 }
 
 #[test]
@@ -331,7 +349,10 @@ fn test_component_ref_let_variable_gets_ternary() {
         <Child ref={childRef}>content</Child>
         "#,
     );
-    assert!(code.contains("typeof"), "Expected typeof check for let ref, output was:\n{code}");
+    assert!(
+        code.contains("typeof"),
+        "Expected typeof check for let ref, output was:\n{code}"
+    );
 }
 
 #[test]
@@ -344,7 +365,10 @@ fn test_component_ref_arrow_function_passed_directly() {
         <Child ref={e => el = e}>content</Child>
         "#,
     );
-    assert!(!code.contains("typeof"), "Should not have typeof check for arrow function ref, output was:\n{code}");
+    assert!(
+        !code.contains("typeof"),
+        "Should not have typeof check for arrow function ref, output was:\n{code}"
+    );
 }
 
 #[test]
@@ -358,7 +382,11 @@ fn test_dom_does_not_duplicate_existing_solid_web_imports() {
         "#,
     );
     assert!(code.contains("solid-js/web"), "Output was:\n{code}");
-    assert_eq!(code.matches("solid-js/web").count(), 1, "Output was:\n{code}");
+    assert_eq!(
+        code.matches("solid-js/web").count(),
+        1,
+        "Output was:\n{code}"
+    );
 }
 
 #[test]
@@ -741,8 +769,27 @@ fn test_ssr_static_element() {
 fn test_ssr_dynamic_attribute() {
     let code = transform_ssr(r#"<div class={style()}>content</div>"#);
     assert!(code.contains("ssr`"));
-    assert!(code.contains("escape"));
+    assert!(code.contains("ssrClassName"));
     assert!(code.contains("style()"));
+}
+
+#[test]
+fn test_ssr_dynamic_class_uses_ssrclassname() {
+    let code = transform_ssr(r#"<div class={cls()} />"#);
+    assert!(code.contains("ssrClassName("), "Output was:\n{code}");
+    assert!(
+        !code.contains("ssrClassList("),
+        "SSR class helper should follow next semantics. Output was:\n{code}"
+    );
+}
+
+#[test]
+fn test_ssr_dynamic_value_uses_ssrattribute_helper() {
+    let code = transform_ssr(r#"<input value={value()} />"#);
+    assert!(
+        code.contains("ssrAttribute(\"value\", escape(value(), true))"),
+        "Expected next-style ssrAttribute helper call for dynamic value. Output was:\n{code}"
+    );
 }
 
 #[test]
@@ -758,6 +805,23 @@ fn test_ssr_component() {
     let code = transform_ssr(r#"<Button onClick={handler}>Click</Button>"#);
     assert!(code.contains("createComponent"));
     assert!(code.contains("Button"));
+    assert!(
+        code.contains("onClick") && code.contains("handler"),
+        "Component props should be preserved in SSR output. Output was:\n{code}"
+    );
+}
+
+#[test]
+fn test_ssr_use_namespace_treated_as_regular_attribute() {
+    let code = transform_ssr(r#"<div use:mask={handler} />"#);
+    assert!(
+        code.contains("ssrAttribute(\"use:mask\""),
+        "use: namespace should be emitted as regular attribute in SSR. Output was:\n{code}"
+    );
+    assert!(
+        !code.contains(" use("),
+        "use: namespace should not invoke directive wiring in SSR. Output was:\n{code}"
+    );
 }
 
 #[test]

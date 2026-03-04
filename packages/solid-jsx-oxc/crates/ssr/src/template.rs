@@ -38,14 +38,9 @@ pub fn escape_value(expr: &str, is_attr: bool) -> String {
     }
 }
 
-/// Generate ssrAttribute call for dynamic boolean attributes
-pub fn ssr_attribute(name: &str, expr: &str, is_boolean: bool) -> String {
-    format!(
-        "ssrAttribute(\"{}\", {}, {})",
-        name,
-        expr,
-        if is_boolean { "true" } else { "false" }
-    )
+/// Generate ssrAttribute call for dynamic attributes
+pub fn ssr_attribute(name: &str, expr: &str) -> String {
+    format!("ssrAttribute(\"{}\", {})", name, expr)
 }
 
 /// Generate ssrStyle call
@@ -53,9 +48,9 @@ pub fn ssr_style(expr: &str) -> String {
     format!("ssrStyle({})", expr)
 }
 
-/// Generate ssrClassList call
-pub fn ssr_class_list(expr: &str) -> String {
-    format!("ssrClassList({})", expr)
+/// Generate ssrClassName call
+pub fn ssr_class_name(expr: &str) -> String {
+    format!("ssrClassName({})", expr)
 }
 
 /// Generate ssrHydrationKey call

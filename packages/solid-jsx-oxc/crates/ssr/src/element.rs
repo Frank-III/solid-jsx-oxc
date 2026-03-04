@@ -10,12 +10,29 @@ use oxc_ast::ast::{
 use oxc_span::SPAN;
 
 use common::{
-    constants::{ALIASES, CHILD_PROPERTIES, PROPERTIES, VOID_ELEMENTS},
+    constants::{CHILD_PROPERTIES, VOID_ELEMENTS},
     expression::escape_html,
-    get_attr_name, is_svg_element, TransformOptions,
+    get_attr_name, TransformOptions,
 };
 
 use crate::ir::{SSRContext, SSRResult};
+
+fn strip_reserved_namespace(key: &str) -> &str {
+    match key.split_once(':') {
+        Some((namespace, name)) if matches!(namespace, "class" | "on" | "style" | "prop") => name,
+        _ => key,
+    }
+}
+
+fn is_static_literal(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::StringLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_) => true,
+        Expression::TemplateLiteral(template) => template.expressions.is_empty(),
+        _ => false,
+    }
+}
 
 /// Transform a native HTML/SVG element for SSR
 pub fn transform_element<'a>(
@@ -93,7 +110,6 @@ fn transform_element_with_spread<'a>(
     result.has_spread = true;
 
     // Build props object - merge spreads with regular attributes
-    let is_svg = is_svg_element(tag_name);
     let mut props = ast.vec();
 
     for attr in &element.opening_element.attributes {
@@ -107,29 +123,15 @@ fn transform_element_with_spread<'a>(
             JSXAttributeItem::Attribute(attr) => {
                 let key = get_attr_name(&attr.name);
                 // Skip client-only attributes
-                if key == "ref"
-                    || key.starts_with("on")
-                    || key.starts_with("use:")
-                    || key.starts_with("prop:")
-                {
+                if key == "ref" || key.starts_with("on") || key.starts_with("prop:") {
                     continue;
                 }
-
-                let attr_name = if is_svg {
-                    key.clone()
-                } else {
-                    ALIASES
-                        .get(key.as_str())
-                        .copied()
-                        .unwrap_or(&key)
-                        .to_string()
-                };
 
                 match &attr.value {
                     Some(JSXAttributeValue::StringLiteral(lit)) => {
                         let key = PropertyKey::StringLiteral(ast.alloc_string_literal(
                             span,
-                            ast.allocator.alloc_str(&attr_name),
+                            ast.allocator.alloc_str(&key),
                             None,
                         ));
                         let value = ast.expression_string_literal(
@@ -151,7 +153,7 @@ fn transform_element_with_spread<'a>(
                         if let Some(expr) = container.expression.as_expression() {
                             let key = PropertyKey::StringLiteral(ast.alloc_string_literal(
                                 span,
-                                ast.allocator.alloc_str(&attr_name),
+                                ast.allocator.alloc_str(&key),
                                 None,
                             ));
                             props.push(ast.object_property_kind_object_property(
@@ -168,7 +170,7 @@ fn transform_element_with_spread<'a>(
                     None => {
                         let key = PropertyKey::StringLiteral(ast.alloc_string_literal(
                             span,
-                            ast.allocator.alloc_str(&attr_name),
+                            ast.allocator.alloc_str(&key),
                             None,
                         ));
                         let value = ast.expression_boolean_literal(span, true);
@@ -332,12 +334,9 @@ fn transform_attributes<'a>(
     context: &SSRContext<'a>,
     options: &TransformOptions<'a>,
 ) {
-    let tag_name = result.tag_name.as_deref().unwrap_or("");
-    let is_svg = is_svg_element(tag_name);
-
     for attr in &element.opening_element.attributes {
         if let JSXAttributeItem::Attribute(attr) = attr {
-            transform_attribute(attr, result, context, options, is_svg);
+            transform_attribute(attr, result, context, options);
         }
     }
 }
@@ -348,14 +347,12 @@ fn transform_attribute<'a>(
     result: &mut SSRResult<'a>,
     context: &SSRContext<'a>,
     _options: &TransformOptions<'a>,
-    is_svg: bool,
 ) {
     let ast = context.ast();
     let key = get_attr_name(&attr.name);
 
     // Skip client-only attributes
-    if key == "ref" || key.starts_with("on") || key.starts_with("use:") || key.starts_with("prop:")
-    {
+    if key == "ref" || key.starts_with("on") || key.starts_with("prop:") {
         return;
     }
 
@@ -365,22 +362,11 @@ fn transform_attribute<'a>(
         return;
     }
 
-    // Get the attribute name (handle aliases like className -> class)
-    let attr_name = if is_svg {
-        key.clone()
-    } else {
-        ALIASES
-            .get(key.as_str())
-            .copied()
-            .unwrap_or(&key)
-            .to_string()
-    };
-
     match &attr.value {
         // Static string value
         Some(JSXAttributeValue::StringLiteral(lit)) => {
             let escaped = escape_html(&lit.value, true);
-            result.push_static(&format!(" {}=\"{}\"", attr_name, escaped));
+            result.push_static(&format!(" {}=\"{}\"", key, escaped));
         }
 
         // Dynamic value
@@ -391,7 +377,7 @@ fn transform_attribute<'a>(
                 // Handle special attributes
                 if key == "style" {
                     context.register_helper("ssrStyle");
-                    result.push_static(&format!(" {}=\"", attr_name));
+                    result.push_static(" style=\"");
                     let callee = ast.expression_identifier(SPAN, "ssrStyle");
                     let mut args = ast.vec();
                     args.push(Argument::from(expr));
@@ -407,15 +393,10 @@ fn transform_attribute<'a>(
                         true,
                     );
                     result.push_static("\"");
-                } else if key == "class" || key == "className" {
-                    context.register_helper("escape");
-                    result.push_static(&format!(" {}=\"", attr_name));
-                    result.push_dynamic(expr, true, false);
-                    result.push_static("\"");
-                } else if key == "classList" {
-                    context.register_helper("ssrClassList");
+                } else if key == "class" {
+                    context.register_helper("ssrClassName");
                     result.push_static(" class=\"");
-                    let callee = ast.expression_identifier(SPAN, "ssrClassList");
+                    let callee = ast.expression_identifier(SPAN, "ssrClassName");
                     let mut args = ast.vec();
                     args.push(Argument::from(expr));
                     result.push_dynamic(
@@ -430,18 +411,53 @@ fn transform_attribute<'a>(
                         true,
                     );
                     result.push_static("\"");
-                } else if PROPERTIES.contains(key.as_str()) {
-                    // Boolean attributes
+                } else {
+                    if let Expression::BooleanLiteral(boolean) = &expr {
+                        if boolean.value {
+                            result.push_static(&format!(" {}", key));
+                        }
+                        return;
+                    }
+
+                    let key_requires_attr_helper =
+                        (key == "value" || key == "checked") && !is_static_literal(&expr);
+
+                    if !key_requires_attr_helper && is_static_literal(&expr) {
+                        result.push_static(&format!(" {}=\"", key));
+                        result.push_dynamic(expr, true, false);
+                        result.push_static("\"");
+                        return;
+                    }
+
                     context.register_helper("ssrAttribute");
                     let callee = ast.expression_identifier(SPAN, "ssrAttribute");
+                    let attr_name = strip_reserved_namespace(&key);
                     let mut args = ast.vec();
                     args.push(Argument::from(ast.expression_string_literal(
                         SPAN,
-                        ast.allocator.alloc_str(&attr_name),
+                        ast.allocator.alloc_str(attr_name),
                         None,
                     )));
-                    args.push(Argument::from(expr));
-                    args.push(Argument::from(ast.expression_boolean_literal(SPAN, true)));
+
+                    let value_expr = if is_static_literal(&expr) {
+                        expr
+                    } else {
+                        context.register_helper("escape");
+                        let escape_callee = ast.expression_identifier(SPAN, "escape");
+                        let mut escape_args = ast.vec();
+                        escape_args.push(Argument::from(expr));
+                        escape_args
+                            .push(Argument::from(ast.expression_boolean_literal(SPAN, true)));
+                        ast.expression_call(
+                            SPAN,
+                            escape_callee,
+                            None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+                            escape_args,
+                            false,
+                        )
+                    };
+
+                    args.push(Argument::from(value_expr));
                     result.push_dynamic(
                         ast.expression_call(
                             SPAN,
@@ -453,19 +469,13 @@ fn transform_attribute<'a>(
                         false,
                         true,
                     );
-                } else {
-                    // Regular attribute
-                    context.register_helper("escape");
-                    result.push_static(&format!(" {}=\"", attr_name));
-                    result.push_dynamic(expr, true, false);
-                    result.push_static("\"");
                 }
             }
         }
 
         // Boolean attribute (no value)
         None => {
-            result.push_static(&format!(" {}", attr_name));
+            result.push_static(&format!(" {}", key));
         }
 
         _ => {}

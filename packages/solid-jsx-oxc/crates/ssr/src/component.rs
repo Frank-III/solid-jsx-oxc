@@ -224,8 +224,8 @@ fn build_props<'a, 'b>(
                 };
                 let key = make_prop_key(ast, span, &raw_key);
 
-                // Skip event handlers and refs in SSR
-                if raw_key.starts_with("on") || raw_key == "ref" || raw_key.starts_with("use:") {
+                // Refs are client-only in SSR, but other props are preserved.
+                if raw_key == "ref" {
                     continue;
                 }
 

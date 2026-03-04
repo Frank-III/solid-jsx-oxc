@@ -145,7 +145,7 @@ impl<'a> SSRResult<'a> {
 
                     // Add hydration marker before dynamic content (not for attributes)
                     if hydratable && !val.is_attr && val.needs_hydration_marker {
-                        result.push_str("<!--#-->");
+                        result.push_str("<!--$-->");
                     }
 
                     result.push_str("${");
@@ -191,7 +191,7 @@ impl<'a> SSRResult<'a> {
             if i < self.template_values.len() {
                 let val = &self.template_values[i];
                 if hydratable && !val.is_attr && val.needs_hydration_marker {
-                    raw.push_str("<!--#-->");
+                    raw.push_str("<!--$-->");
                     closing_marker_prefix.push_str("<!--/-->");
                 }
             }
