@@ -134,6 +134,16 @@ fn test_dom_oncapture_namespace_not_event_handler() {
     );
 }
 
+#[test]
+fn test_dom_use_namespace_not_special_cased() {
+    let code = transform_dom(r#"<div use:mask={handler} />"#);
+    assert!(code.contains("\"use:mask\""));
+    assert!(
+        !code.contains("use("),
+        "use: namespace should be treated as a normal attribute: {code}"
+    );
+}
+
 // ============================================================================
 // DOM: Event Handlers
 // ============================================================================

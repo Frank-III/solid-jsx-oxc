@@ -235,7 +235,7 @@ fn element_needs_runtime_access(element: &JSXElement) -> bool {
     for attr in &element.opening_element.attributes {
         match attr {
             JSXAttributeItem::Attribute(attr) => {
-                // Namespaced attributes like on:click or use:directive always need access
+                // Namespaced attributes always need access
                 if is_namespaced_attr(&attr.name) {
                     return true;
                 }
@@ -354,12 +354,6 @@ fn transform_attribute<'a>(
     if key.starts_with("on:") || (key.starts_with("on") && !key.contains(':')) {
         let elem_id = elem_id.expect("event handlers require an element id");
         transform_event(attr, &key, elem_id, result, context, options);
-        return;
-    }
-
-    if key.starts_with("use:") {
-        let elem_id = elem_id.expect("directives require an element id");
-        transform_directive(attr, &key, elem_id, result, context);
         return;
     }
 
@@ -628,43 +622,6 @@ fn transform_event<'a>(
             [elem, event, handler, capture],
         ));
     }
-}
-
-/// Transform use: directive
-fn transform_directive<'a>(
-    attr: &JSXAttribute<'a>,
-    key: &str,
-    elem_id: &str,
-    result: &mut TransformResult<'a>,
-    context: &BlockContext<'a>,
-) {
-    let ast = context.ast();
-    context.register_helper("use");
-    let directive_name = &key[4..]; // Strip "use:"
-
-    let value = attr
-        .value
-        .as_ref()
-        .and_then(|v| match v {
-            JSXAttributeValue::ExpressionContainer(container) => {
-                container.expression.as_expression()
-            }
-            _ => None,
-        })
-        .map(|e| arrow_zero_params_return_expr(ast, attr.span, context.clone_expr(e)))
-        .unwrap_or_else(|| ast.expression_identifier(SPAN, "undefined"));
-
-    let callee = ident_expr(ast, attr.span, "use");
-    result.exprs.push(call_expr(
-        ast,
-        attr.span,
-        callee,
-        [
-            ident_expr(ast, attr.span, directive_name),
-            ident_expr(ast, attr.span, elem_id),
-            value,
-        ],
-    ));
 }
 
 /// Transform prop: prefix (direct DOM property assignment)
