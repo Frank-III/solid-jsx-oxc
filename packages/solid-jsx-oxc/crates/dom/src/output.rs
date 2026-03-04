@@ -1,10 +1,11 @@
 use oxc_allocator::CloneIn;
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, Expression, FormalParameterKind, Statement,
+    Argument, ArrayExpressionElement, AssignmentTarget, Expression, FormalParameterKind, Statement,
     VariableDeclarationKind,
 };
 use oxc_ast::{AstBuilder, NONE};
 use oxc_span::{Span, SPAN};
+use oxc_syntax::operator::AssignmentOperator;
 
 use crate::ir::{BlockContext, TransformResult};
 
@@ -65,6 +66,44 @@ fn const_decl_stmt<'a>(
     ))
 }
 
+fn let_decl_stmt<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    name: &str,
+    init: Option<Expression<'a>>,
+) -> Statement<'a> {
+    let declarator = ast.variable_declarator(
+        span,
+        VariableDeclarationKind::Let,
+        ast.binding_pattern_binding_identifier(span, ast.allocator.alloc_str(name)),
+        NONE,
+        init,
+        false,
+    );
+    Statement::VariableDeclaration(ast.alloc_variable_declaration(
+        span,
+        VariableDeclarationKind::Let,
+        ast.vec1(declarator),
+        false,
+    ))
+}
+
+fn expression_to_assignment_target<'a>(expr: Expression<'a>) -> Option<AssignmentTarget<'a>> {
+    match expr {
+        Expression::Identifier(ident) => Some(AssignmentTarget::AssignmentTargetIdentifier(ident)),
+        Expression::StaticMemberExpression(m) => Some(AssignmentTarget::StaticMemberExpression(m)),
+        Expression::ComputedMemberExpression(m) => {
+            Some(AssignmentTarget::ComputedMemberExpression(m))
+        }
+        Expression::PrivateFieldExpression(m) => Some(AssignmentTarget::PrivateFieldExpression(m)),
+        Expression::TSAsExpression(e) => Some(AssignmentTarget::TSAsExpression(e)),
+        Expression::TSSatisfiesExpression(e) => Some(AssignmentTarget::TSSatisfiesExpression(e)),
+        Expression::TSNonNullExpression(e) => Some(AssignmentTarget::TSNonNullExpression(e)),
+        Expression::TSTypeAssertion(e) => Some(AssignmentTarget::TSTypeAssertion(e)),
+        _ => None,
+    }
+}
+
 fn arrow_zero_params_body<'a>(
     ast: AstBuilder<'a>,
     span: Span,
@@ -82,6 +121,21 @@ fn arrow_zero_params_body<'a>(
     ));
     let body = ast.alloc_function_body(span, ast.vec(), statements);
     ast.expression_arrow_function(span, true, false, NONE, params, NONE, body)
+}
+
+fn arrow_zero_params_statements<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    statements: oxc_allocator::Vec<'a, Statement<'a>>,
+) -> Expression<'a> {
+    let params = ast.alloc_formal_parameters(
+        span,
+        FormalParameterKind::ArrowFormalParameters,
+        ast.vec(),
+        NONE,
+    );
+    let body = ast.alloc_function_body(span, ast.vec(), statements);
+    ast.expression_arrow_function(span, false, false, NONE, params, NONE, body)
 }
 
 pub fn build_dom_output_expr<'a>(
@@ -157,15 +211,75 @@ pub fn build_dom_output_expr<'a>(
         // Dynamic bindings (effect(() => setter))
         for binding in &result.dynamics {
             context.register_helper("effect");
-            if binding.key == "style" {
-                context.register_helper("style");
-            } else if binding.key == "class" {
-                context.register_helper("className");
+
+            if binding.key == "style" || binding.key == "class" {
+                // Next-style dynamic lowering keeps previous input values for class/style.
+                // This matches dom-expressions behavior where helpers receive prev state.
+                if binding.key == "style" {
+                    context.register_helper("style");
+                } else {
+                    context.register_helper("className");
+                }
+
+                let prev_var = context.generate_uid("p$");
+                let value_var = context.generate_uid("v$");
+
+                statements.push(let_decl_stmt(ast, gen_span, &prev_var, None));
+
+                let value_ident = ident_expr(ast, gen_span, &value_var);
+                let prev_ident = ident_expr(ast, gen_span, &prev_var);
+
+                let setter = crate::template::generate_set_attr_expr(
+                    ast,
+                    gen_span,
+                    binding,
+                    value_ident.clone_in(ast.allocator),
+                    Some(prev_ident.clone_in(ast.allocator)),
+                );
+
+                let Some(prev_target) = expression_to_assignment_target(prev_ident) else {
+                    continue;
+                };
+
+                let prev_assign = ast.expression_assignment(
+                    gen_span,
+                    AssignmentOperator::Assign,
+                    prev_target,
+                    value_ident.clone_in(ast.allocator),
+                );
+
+                let mut effect_statements = ast.vec();
+                effect_statements.push(const_decl_stmt(
+                    ast,
+                    gen_span,
+                    &value_var,
+                    binding.value.clone_in(ast.allocator),
+                ));
+                effect_statements.push(Statement::ExpressionStatement(
+                    ast.alloc_expression_statement(gen_span, setter),
+                ));
+                effect_statements.push(Statement::ExpressionStatement(
+                    ast.alloc_expression_statement(gen_span, prev_assign),
+                ));
+
+                let effect = ident_expr(ast, gen_span, "effect");
+                let arrow = arrow_zero_params_statements(ast, gen_span, effect_statements);
+                let effect_call = call_expr(ast, gen_span, effect, [arrow]);
+                statements.push(Statement::ExpressionStatement(
+                    ast.alloc_expression_statement(gen_span, effect_call),
+                ));
+                continue;
             } else {
                 context.register_helper("setAttribute");
             }
 
-            let setter = crate::template::generate_set_attr_expr(ast, gen_span, binding);
+            let setter = crate::template::generate_set_attr_expr(
+                ast,
+                gen_span,
+                binding,
+                binding.value.clone_in(ast.allocator),
+                None,
+            );
             let effect = ident_expr(ast, gen_span, "effect");
             let arrow = arrow_zero_params_body(ast, gen_span, setter);
             let effect_call = call_expr(ast, gen_span, effect, [arrow]);

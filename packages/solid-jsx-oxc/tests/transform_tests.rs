@@ -80,6 +80,30 @@ fn test_dom_dynamic_multiple_attrs() {
 }
 
 #[test]
+fn test_dom_dynamic_attr_uses_setattribute_helper() {
+    let code = transform_dom(r#"<div aria-hidden={hidden()} />"#);
+    assert!(code.contains("setAttribute("));
+    assert!(
+        !code.contains(".setAttribute("),
+        "dynamic attributes should use helper semantics, not direct DOM API: {code}"
+    );
+}
+
+#[test]
+fn test_dom_dynamic_class_tracks_previous_value() {
+    let code = transform_dom(r#"<div class={cls()} />"#);
+    assert!(code.contains("let _p$"));
+    assert!(code.contains("className("));
+}
+
+#[test]
+fn test_dom_select_value_queues_microtask() {
+    let code = transform_dom(r#"<select value={value()}><option value="a">A</option></select>"#);
+    assert!(code.contains("queueMicrotask"));
+    assert!(code.contains(".value"));
+}
+
+#[test]
 fn test_dom_mixed_static_dynamic() {
     let code = transform_dom(r#"<div class="static" id={dynamic()}>content</div>"#);
     // Static class should be in template

@@ -1,8 +1,8 @@
 use oxc_allocator::CloneIn;
-use oxc_ast::ast::{AssignmentTarget, Expression};
-use oxc_ast::AstBuilder;
+use oxc_ast::ast::{Argument, AssignmentTarget, Expression, FormalParameterKind, Statement};
+use oxc_ast::{AstBuilder, NONE};
 use oxc_span::Span;
-use oxc_syntax::operator::AssignmentOperator;
+use oxc_syntax::operator::{AssignmentOperator, LogicalOperator};
 
 use crate::ir::DynamicBinding;
 
@@ -38,42 +38,87 @@ fn expression_to_assignment_target<'a>(expr: Expression<'a>) -> Option<Assignmen
     }
 }
 
+fn call_expr<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    callee: Expression<'a>,
+    args: impl IntoIterator<Item = Expression<'a>>,
+) -> Expression<'a> {
+    let mut arguments = ast.vec();
+    for arg in args {
+        arguments.push(Argument::from(arg));
+    }
+    ast.expression_call(
+        span,
+        callee,
+        None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+        arguments,
+        false,
+    )
+}
+
+fn arrow_zero_params_expr<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    expr: Expression<'a>,
+) -> Expression<'a> {
+    let params = ast.alloc_formal_parameters(
+        span,
+        FormalParameterKind::ArrowFormalParameters,
+        ast.vec(),
+        NONE,
+    );
+    let body = ast.alloc_function_body(
+        span,
+        ast.vec(),
+        ast.vec1(Statement::ExpressionStatement(
+            ast.alloc_expression_statement(span, expr),
+        )),
+    );
+    ast.expression_arrow_function(span, true, false, NONE, params, NONE, body)
+}
+
 pub fn generate_set_attr_expr<'a>(
     ast: AstBuilder<'a>,
     span: Span,
     binding: &DynamicBinding<'a>,
+    value: Expression<'a>,
+    prev_value: Option<Expression<'a>>,
 ) -> Expression<'a> {
     let key = binding.key.as_str();
     let elem = ident_expr(ast, span, &binding.elem);
-    let value = binding.value.clone_in(ast.allocator);
 
     // Handle special cases
     if key == "class" {
         let callee = ident_expr(ast, span, "className");
-        let args = if binding.is_svg {
+        return if let Some(prev) = prev_value {
+            let is_svg = ast.expression_boolean_literal(span, binding.is_svg);
+            call_expr(
+                ast,
+                span,
+                callee,
+                [
+                    elem,
+                    value,
+                    is_svg,
+                    prev,
+                ],
+            )
+        } else if binding.is_svg {
             let is_svg = ast.expression_boolean_literal(span, true);
-            ast.vec_from_array([elem.into(), value.into(), is_svg.into()])
+            call_expr(ast, span, callee, [elem, value, is_svg])
         } else {
-            ast.vec_from_array([elem.into(), value.into()])
+            call_expr(ast, span, callee, [elem, value])
         };
-        return ast.expression_call(
-            span,
-            callee,
-            None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
-            args,
-            false,
-        );
     }
 
     if key == "style" {
         let callee = ident_expr(ast, span, "style");
-        return ast.expression_call(
-            span,
-            callee,
-            None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
-            ast.vec_from_array([elem.into(), value.into()]),
-            false,
-        );
+        return if let Some(prev) = prev_value {
+            call_expr(ast, span, callee, [elem, value, prev])
+        } else {
+            call_expr(ast, span, callee, [elem, value])
+        };
     }
 
     if key == "textContent" || key == "innerText" {
@@ -87,18 +132,27 @@ pub fn generate_set_attr_expr<'a>(
     if common::constants::PROPERTIES.contains(key) {
         let member = static_member(ast, span, elem, key);
         if let Some(target) = expression_to_assignment_target(member) {
-            return ast.expression_assignment(span, AssignmentOperator::Assign, target, value);
+            let assignment = ast.expression_assignment(span, AssignmentOperator::Assign, target, value);
+            if key == "value" && binding.tag_name == "select" {
+                let queue_microtask = ident_expr(ast, span, "queueMicrotask");
+                let queue_call = call_expr(
+                    ast,
+                    span,
+                    queue_microtask,
+                    [arrow_zero_params_expr(
+                        ast,
+                        span,
+                        assignment.clone_in(ast.allocator),
+                    )],
+                );
+                return ast.expression_logical(span, queue_call, LogicalOperator::Or, assignment);
+            }
+            return assignment;
         }
         return ast.expression_identifier(span, "undefined");
     }
 
-    let set_attr = static_member(ast, span, elem, "setAttribute");
+    let set_attr = ident_expr(ast, span, "setAttribute");
     let name = ast.expression_string_literal(span, ast.allocator.alloc_str(key), None);
-    ast.expression_call(
-        span,
-        set_attr,
-        None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
-        ast.vec_from_array([name.into(), value.into()]),
-        false,
-    )
+    call_expr(ast, span, set_attr, [elem, name, value])
 }
