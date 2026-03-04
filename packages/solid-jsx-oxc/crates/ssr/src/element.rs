@@ -4,8 +4,8 @@
 //! Unlike DOM, we don't create DOM nodes - we build strings.
 
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, Expression, JSXAttribute, JSXAttributeItem, JSXAttributeName,
-    JSXAttributeValue, JSXElement, PropertyKey, PropertyKind,
+    Argument, ArrayExpressionElement, BinaryOperator, Expression, JSXAttribute, JSXAttributeItem,
+    JSXAttributeName, JSXAttributeValue, JSXElement, PropertyKey, PropertyKind,
 };
 use oxc_span::SPAN;
 
@@ -31,6 +31,24 @@ fn is_static_literal(expr: &Expression<'_>) -> bool {
         | Expression::BooleanLiteral(_) => true,
         Expression::TemplateLiteral(template) => template.expressions.is_empty(),
         _ => false,
+    }
+}
+
+fn attr_value_expr<'a>(
+    value: &Option<JSXAttributeValue<'a>>,
+    context: &SSRContext<'a>,
+) -> Option<Expression<'a>> {
+    let ast = context.ast();
+    match value {
+        Some(JSXAttributeValue::ExpressionContainer(container)) => container
+            .expression
+            .as_expression()
+            .map(|expr| context.clone_expr(expr)),
+        Some(JSXAttributeValue::StringLiteral(lit)) => {
+            Some(ast.expression_string_literal(SPAN, ast.allocator.alloc_str(&lit.value), None))
+        }
+        None => Some(ast.expression_boolean_literal(SPAN, true)),
+        _ => None,
     }
 }
 
@@ -334,11 +352,227 @@ fn transform_attributes<'a>(
     context: &SSRContext<'a>,
     options: &TransformOptions<'a>,
 ) {
+    let mut class_attrs: Vec<&JSXAttribute<'a>> = Vec::new();
+    let mut style_attrs: Vec<&JSXAttribute<'a>> = Vec::new();
+    let mut regular_attrs: Vec<&JSXAttribute<'a>> = Vec::new();
+
     for attr in &element.opening_element.attributes {
         if let JSXAttributeItem::Attribute(attr) = attr {
-            transform_attribute(attr, result, context, options);
+            let key = get_attr_name(&attr.name);
+            if key == "class" || key.starts_with("class:") {
+                class_attrs.push(attr);
+            } else if key == "style" || key.starts_with("style:") {
+                style_attrs.push(attr);
+            } else {
+                regular_attrs.push(attr);
+            }
         }
     }
+
+    for attr in regular_attrs {
+        transform_attribute(attr, result, context, options);
+    }
+
+    transform_class_group(&class_attrs, result, context);
+    transform_style_group(&style_attrs, result, context);
+}
+
+fn transform_class_group<'a>(
+    attrs: &[&JSXAttribute<'a>],
+    result: &mut SSRResult<'a>,
+    context: &SSRContext<'a>,
+) {
+    if attrs.is_empty() {
+        return;
+    }
+
+    let ast = context.ast();
+    let mut parts: Vec<Expression<'a>> = Vec::new();
+
+    for attr in attrs {
+        let key = get_attr_name(&attr.name);
+        if key == "class" {
+            if let Some(expr) = attr_value_expr(&attr.value, context) {
+                parts.push(expr);
+            }
+            continue;
+        }
+
+        if let Some(class_name) = key.strip_prefix("class:") {
+            if class_name.is_empty() {
+                continue;
+            }
+            let Some(value_expr) = attr_value_expr(&attr.value, context) else {
+                continue;
+            };
+            let mut properties = ast.vec();
+            let key = PropertyKey::StringLiteral(ast.alloc_string_literal(
+                SPAN,
+                ast.allocator.alloc_str(class_name),
+                None,
+            ));
+            properties.push(ast.object_property_kind_object_property(
+                SPAN,
+                PropertyKind::Init,
+                key,
+                value_expr,
+                false,
+                false,
+                false,
+            ));
+            parts.push(ast.expression_object(SPAN, properties));
+        }
+    }
+
+    if parts.is_empty() {
+        return;
+    }
+
+    let class_expr = if parts.len() == 1 {
+        parts.into_iter().next().unwrap_or_else(|| {
+            ast.expression_string_literal(SPAN, ast.allocator.alloc_str(""), None)
+        })
+    } else {
+        let mut elements = ast.vec();
+        for part in parts {
+            elements.push(ArrayExpressionElement::from(part));
+        }
+        ast.expression_array(SPAN, elements)
+    };
+
+    context.register_helper("ssrClassName");
+    result.push_static(" class=\"");
+    let callee = ast.expression_identifier(SPAN, "ssrClassName");
+    let mut args = ast.vec();
+    args.push(Argument::from(class_expr));
+    result.push_dynamic(
+        ast.expression_call(
+            SPAN,
+            callee,
+            None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+            args,
+            false,
+        ),
+        false,
+        true,
+    );
+    result.push_static("\"");
+}
+
+fn transform_style_group<'a>(
+    attrs: &[&JSXAttribute<'a>],
+    result: &mut SSRResult<'a>,
+    context: &SSRContext<'a>,
+) {
+    if attrs.is_empty() {
+        return;
+    }
+
+    let ast = context.ast();
+    let mut segments: Vec<Expression<'a>> = Vec::new();
+
+    for attr in attrs {
+        let key = get_attr_name(&attr.name);
+
+        if key == "style" {
+            match &attr.value {
+                Some(JSXAttributeValue::StringLiteral(lit)) => {
+                    segments.push(ast.expression_string_literal(
+                        SPAN,
+                        ast.allocator.alloc_str(&escape_html(&lit.value, true)),
+                        None,
+                    ));
+                }
+                Some(JSXAttributeValue::ExpressionContainer(container)) => {
+                    if let Some(expr) = container.expression.as_expression() {
+                        context.register_helper("ssrStyle");
+                        let callee = ast.expression_identifier(SPAN, "ssrStyle");
+                        let mut args = ast.vec();
+                        args.push(Argument::from(context.clone_expr(expr)));
+                        segments.push(ast.expression_call(
+                            SPAN,
+                            callee,
+                            None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+                            args,
+                            false,
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        if let Some(style_name) = key.strip_prefix("style:") {
+            if style_name.is_empty() {
+                continue;
+            }
+            let Some(value_expr) = attr_value_expr(&attr.value, context) else {
+                continue;
+            };
+            context.register_helper("ssrStyleProperty");
+            let callee = ast.expression_identifier(SPAN, "ssrStyleProperty");
+            let prefix = if segments.is_empty() {
+                format!("{}:", style_name)
+            } else {
+                format!(";{}:", style_name)
+            };
+            let mut args = ast.vec();
+            args.push(Argument::from(ast.expression_string_literal(
+                SPAN,
+                ast.allocator.alloc_str(&prefix),
+                None,
+            )));
+
+            let escaped_value = if is_static_literal(&value_expr) {
+                value_expr
+            } else {
+                context.register_helper("escape");
+                let escape_callee = ast.expression_identifier(SPAN, "escape");
+                let mut escape_args = ast.vec();
+                escape_args.push(Argument::from(value_expr));
+                escape_args.push(Argument::from(ast.expression_boolean_literal(SPAN, true)));
+                ast.expression_call(
+                    SPAN,
+                    escape_callee,
+                    None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+                    escape_args,
+                    false,
+                )
+            };
+            args.push(Argument::from(escaped_value));
+
+            segments.push(ast.expression_call(
+                SPAN,
+                callee,
+                None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+                args,
+                false,
+            ));
+        }
+    }
+
+    if segments.is_empty() {
+        return;
+    }
+
+    let style_expr = if segments.len() == 1 {
+        segments.into_iter().next().unwrap_or_else(|| {
+            ast.expression_string_literal(SPAN, ast.allocator.alloc_str(""), None)
+        })
+    } else {
+        let mut iter = segments.into_iter();
+        let first = iter.next().unwrap_or_else(|| {
+            ast.expression_string_literal(SPAN, ast.allocator.alloc_str(""), None)
+        });
+        iter.fold(first, |acc, expr| {
+            ast.expression_binary(SPAN, acc, BinaryOperator::Addition, expr)
+        })
+    };
+
+    result.push_static(" style=\"");
+    result.push_dynamic(style_expr, false, true);
+    result.push_static("\"");
 }
 
 /// Transform a single attribute for SSR

@@ -825,6 +825,32 @@ fn test_ssr_use_namespace_treated_as_regular_attribute() {
 }
 
 #[test]
+fn test_ssr_class_namespace_uses_class_helper() {
+    let code = transform_ssr(r#"<div class:active={state.active} />"#);
+    assert!(
+        code.contains("ssrClassName"),
+        "class: namespace should normalize through class helper. Output was:\n{code}"
+    );
+    assert!(
+        code.contains("active"),
+        "Expected class namespace key in output. Output was:\n{code}"
+    );
+}
+
+#[test]
+fn test_ssr_style_namespace_uses_style_property_helper() {
+    let code = transform_ssr(r#"<div style:padding-top={top()} />"#);
+    assert!(
+        code.contains("ssrStyleProperty"),
+        "style: namespace should normalize through ssrStyleProperty. Output was:\n{code}"
+    );
+    assert!(
+        code.contains("padding-top:"),
+        "Expected style namespace key in output. Output was:\n{code}"
+    );
+}
+
+#[test]
 fn test_ssr_for() {
     let code = transform_ssr(r#"<For each={items}>{item => <li>{item}</li>}</For>"#);
     assert!(code.contains("For"));
