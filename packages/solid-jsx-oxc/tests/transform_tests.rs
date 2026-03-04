@@ -3,6 +3,8 @@
 //! These tests verify the OXC compiler output matches expected SolidJS patterns.
 
 use common::GenerateMode;
+use std::fs;
+use std::path::Path;
 use solid_jsx_oxc::{transform, TransformOptions};
 
 /// Helper to normalize whitespace for comparison
@@ -23,6 +25,16 @@ fn transform_dom(source: &str) -> String {
 fn transform_ssr(source: &str) -> String {
     let options = TransformOptions {
         generate: GenerateMode::Ssr,
+        ..TransformOptions::solid_defaults()
+    };
+    let result = transform(source, Some(options));
+    normalize(&result.code)
+}
+
+fn transform_ssr_with_hydration(source: &str, hydratable: bool) -> String {
+    let options = TransformOptions {
+        generate: GenerateMode::Ssr,
+        hydratable,
         ..TransformOptions::solid_defaults()
     };
     let result = transform(source, Some(options));
@@ -848,6 +860,61 @@ fn test_ssr_style_namespace_uses_style_property_helper() {
         code.contains("padding-top:"),
         "Expected style namespace key in output. Output was:\n{code}"
     );
+}
+
+#[test]
+fn test_ssr_upstream_fixture_smoke_no_legacy_markers() {
+    let fixture_sets = [
+        (
+            "../babel-plugin-jsx-dom-expressions/test/__ssr_fixtures__",
+            false,
+        ),
+        (
+            "../babel-plugin-jsx-dom-expressions/test/__ssr_hydratable_fixtures__",
+            true,
+        ),
+    ];
+
+    for (root, hydratable) in fixture_sets {
+        let root_path = Path::new(root);
+        let entries = fs::read_dir(root_path)
+            .unwrap_or_else(|e| panic!("failed to read fixtures at {}: {e}", root_path.display()));
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|e| panic!("failed to read dir entry: {e}"));
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let source_path = path.join("code.js");
+            if !source_path.exists() {
+                continue;
+            }
+
+            let source = fs::read_to_string(&source_path).unwrap_or_else(|e| {
+                panic!("failed to read fixture source {}: {e}", source_path.display())
+            });
+            let code = transform_ssr_with_hydration(&source, hydratable);
+
+            assert!(
+                !code.contains("ssrClassList("),
+                "legacy ssrClassList helper found for fixture {}:\n{}",
+                source_path.display(),
+                code
+            );
+            assert!(
+                !code.contains("data-hk"),
+                "legacy data-hk hydration key found for fixture {}:\n{}",
+                source_path.display(),
+                code
+            );
+            assert!(
+                !code.contains("<!--#-->"),
+                "legacy hydration marker found for fixture {}:\n{}",
+                source_path.display(),
+                code
+            );
+        }
+    }
 }
 
 #[test]
