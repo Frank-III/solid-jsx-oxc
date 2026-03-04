@@ -19,7 +19,7 @@ use crate::ir::{SSRContext, SSRResult};
 
 fn strip_reserved_namespace(key: &str) -> &str {
     match key.split_once(':') {
-        Some((namespace, name)) if matches!(namespace, "class" | "on" | "style" | "prop") => name,
+        Some((namespace, name)) if matches!(namespace, "on" | "prop") => name,
         _ => key,
     }
 }
