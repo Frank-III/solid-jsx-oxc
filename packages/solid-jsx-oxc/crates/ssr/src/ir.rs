@@ -131,6 +131,7 @@ impl<'a> SSRResult<'a> {
 
     /// Generate the final ssr tagged template call with optional hydration markers
     pub fn to_ssr_call_with_hydration(&self, hydratable: bool) -> String {
+        let _ = hydratable;
         if self.template_values.is_empty() {
             // No dynamic values, just return static string
             format!("\"{}\"", self.template_parts.join(""))
@@ -143,11 +144,6 @@ impl<'a> SSRResult<'a> {
                 if i < self.template_values.len() {
                     let val = &self.template_values[i];
 
-                    // Add hydration marker before dynamic content (not for attributes)
-                    if hydratable && !val.is_attr && val.needs_hydration_marker {
-                        result.push_str("<!--$-->");
-                    }
-
                     result.push_str("${");
                     if val.skip_escape {
                         result.push_str(&expr_to_string(&val.expr));
@@ -157,11 +153,6 @@ impl<'a> SSRResult<'a> {
                         result.push_str(&format!("escape({})", expr_to_string(&val.expr)));
                     }
                     result.push('}');
-
-                    // Add closing hydration marker
-                    if hydratable && !val.is_attr && val.needs_hydration_marker {
-                        result.push_str("<!--/-->");
-                    }
                 }
             }
 
@@ -171,6 +162,7 @@ impl<'a> SSRResult<'a> {
     }
 
     pub fn to_ssr_expression(&self, ast: AstBuilder<'a>, hydratable: bool) -> Expression<'a> {
+        let _ = hydratable;
         let gen_span = SPAN;
 
         if self.template_values.is_empty() {
@@ -181,23 +173,9 @@ impl<'a> SSRResult<'a> {
 
         // Build quasis (static template parts)
         let mut quasis = ast.vec();
-        let mut closing_marker_prefix = String::new();
         for (i, part) in self.template_parts.iter().enumerate() {
-            let mut raw = String::new();
-            raw.push_str(&closing_marker_prefix);
-            closing_marker_prefix.clear();
-            raw.push_str(part);
-
-            if i < self.template_values.len() {
-                let val = &self.template_values[i];
-                if hydratable && !val.is_attr && val.needs_hydration_marker {
-                    raw.push_str("<!--$-->");
-                    closing_marker_prefix.push_str("<!--/-->");
-                }
-            }
-
             let is_tail = i == self.template_parts.len() - 1;
-            let part_str = ast.allocator.alloc_str(&raw);
+            let part_str = ast.allocator.alloc_str(part);
             let value = TemplateElementValue {
                 raw: ast.atom(part_str),
                 cooked: Some(ast.atom(part_str)),

@@ -499,6 +499,31 @@ fn test_dom_spread() {
     assert!(code.contains("props"));
 }
 
+#[test]
+fn test_dom_spread_merges_namespace_and_class_updates() {
+    let code = transform_dom(r#"<div {...props} class:active={a()} style:padding-top={t()} class={c()} />"#);
+    assert!(
+        code.contains("mergeProps"),
+        "Spread + dynamic attrs should merge through mergeProps in next semantics. Output was:\n{code}"
+    );
+    assert!(
+        code.contains("\"class:active\""),
+        "Expected class namespace key in merged spread props. Output was:\n{code}"
+    );
+    assert!(
+        code.contains("\"style:padding-top\""),
+        "Expected style namespace key in merged spread props. Output was:\n{code}"
+    );
+    assert!(
+        !code.contains("classList.toggle(\"active\""),
+        "Spread namespace updates should not lower into standalone classList.toggle effects. Output was:\n{code}"
+    );
+    assert!(
+        !code.contains("setStyleProperty"),
+        "Spread namespace updates should not lower into standalone setStyleProperty effects. Output was:\n{code}"
+    );
+}
+
 // ============================================================================
 // DOM: Nested Dynamic Elements
 // ============================================================================
@@ -810,6 +835,10 @@ fn test_ssr_dynamic_child() {
     assert!(code.contains("ssr`"));
     assert!(code.contains("escape"));
     assert!(code.contains("count()"));
+    assert!(
+        !code.contains("<!--$-->") && !code.contains("<!--/-->"),
+        "SSR next output should avoid inline hydration markers. Output was:\n{code}"
+    );
 }
 
 #[test]

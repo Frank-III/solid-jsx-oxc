@@ -3,8 +3,9 @@
 
 use oxc_allocator::CloneIn;
 use oxc_ast::ast::{
-    Argument, AssignmentTarget, Expression, FormalParameterKind, JSXAttribute, JSXAttributeItem,
-    JSXAttributeValue, JSXElement, Statement,
+    Argument, AssignmentTarget, Expression, FormalParameterKind, FunctionType, JSXAttribute,
+    JSXAttributeItem, JSXAttributeValue, JSXElement, ObjectPropertyKind, PropertyKey, PropertyKind,
+    Statement,
 };
 use oxc_ast::AstBuilder;
 use oxc_ast::NONE;
@@ -113,6 +114,30 @@ fn arrow_zero_params_return_expr<'a>(
     ast.expression_arrow_function(SPAN, true, false, NONE, params, NONE, body)
 }
 
+fn getter_return_expr<'a>(ast: AstBuilder<'a>, span: Span, expr: Expression<'a>) -> Expression<'a> {
+    let _ = span;
+    let params =
+        ast.alloc_formal_parameters(SPAN, FormalParameterKind::FormalParameter, ast.vec(), NONE);
+    let mut statements = ast.vec_with_capacity(1);
+    statements.push(Statement::ReturnStatement(
+        ast.alloc_return_statement(SPAN, Some(expr)),
+    ));
+    let body = ast.alloc_function_body(SPAN, ast.vec(), statements);
+    ast.expression_function(
+        SPAN,
+        FunctionType::FunctionExpression,
+        None,
+        false,
+        false,
+        false,
+        NONE,
+        NONE,
+        params,
+        NONE,
+        Some(body),
+    )
+}
+
 fn expression_to_assignment_target<'a>(expr: Expression<'a>) -> Option<AssignmentTarget<'a>> {
     match expr {
         Expression::Identifier(ident) => Some(AssignmentTarget::AssignmentTargetIdentifier(ident)),
@@ -133,6 +158,105 @@ fn expression_to_assignment_target<'a>(expr: Expression<'a>) -> Option<Assignmen
         }
         Expression::TSTypeAssertion(e) => expression_to_assignment_target(e.unbox().expression),
         _ => None,
+    }
+}
+
+fn is_event_attr_key(key: &str) -> bool {
+    key.starts_with("on:") || (key.starts_with("on") && !key.contains(':'))
+}
+
+fn should_inline_attr_in_spread(key: &str) -> bool {
+    if is_event_attr_key(key) {
+        return false;
+    }
+    if key == "ref" || key.starts_with("prop:") {
+        return false;
+    }
+    if key == "innerHTML" || key == "textContent" || key == "innerText" {
+        return false;
+    }
+    true
+}
+
+fn flush_inline_spread_props<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    inline_props: &mut Vec<ObjectPropertyKind<'a>>,
+    merge_args: &mut Vec<Expression<'a>>,
+) {
+    if inline_props.is_empty() {
+        return;
+    }
+
+    let mut props = ast.vec_with_capacity(inline_props.len());
+    for prop in inline_props.drain(..) {
+        props.push(prop);
+    }
+    merge_args.push(ast.expression_object(span, props));
+}
+
+fn push_attr_as_spread_prop<'a>(
+    attr: &JSXAttribute<'a>,
+    key: &str,
+    inline_props: &mut Vec<ObjectPropertyKind<'a>>,
+    context: &BlockContext<'a>,
+) {
+    let ast = context.ast();
+    let prop_key = PropertyKey::StringLiteral(ast.alloc_string_literal(
+        SPAN,
+        ast.allocator.alloc_str(key),
+        None,
+    ));
+
+    match &attr.value {
+        Some(JSXAttributeValue::StringLiteral(lit)) => {
+            inline_props.push(ast.object_property_kind_object_property(
+                SPAN,
+                PropertyKind::Init,
+                prop_key,
+                ast.expression_string_literal(SPAN, ast.allocator.alloc_str(&lit.value), None),
+                false,
+                false,
+                false,
+            ));
+        }
+        Some(JSXAttributeValue::ExpressionContainer(container)) => {
+            if let Some(expr) = container.expression.as_expression() {
+                if is_dynamic(expr) {
+                    inline_props.push(ast.object_property_kind_object_property(
+                        SPAN,
+                        PropertyKind::Get,
+                        prop_key,
+                        getter_return_expr(ast, attr.span, context.clone_expr(expr)),
+                        false,
+                        false,
+                        false,
+                    ));
+                } else {
+                    inline_props.push(ast.object_property_kind_object_property(
+                        SPAN,
+                        PropertyKind::Init,
+                        prop_key,
+                        context.clone_expr(expr),
+                        false,
+                        false,
+                        false,
+                    ));
+                }
+            }
+        }
+        None => {
+            inline_props.push(ast.object_property_kind_object_property(
+                SPAN,
+                PropertyKind::Init,
+                prop_key,
+                ast.expression_boolean_literal(SPAN, true),
+                false,
+                false,
+                false,
+            ));
+        }
+        _ => {}
     }
 }
 
@@ -307,29 +431,100 @@ fn transform_attributes<'a>(
 ) {
     let ast = context.ast();
     let elem_id = result.id.clone();
+    let has_spread = element
+        .opening_element
+        .attributes
+        .iter()
+        .any(|attr| matches!(attr, JSXAttributeItem::SpreadAttribute(_)));
 
-    for attr in &element.opening_element.attributes {
-        match attr {
-            JSXAttributeItem::Attribute(attr) => {
-                transform_attribute(attr, elem_id.as_deref(), result, context, options, ctx);
-            }
-            JSXAttributeItem::SpreadAttribute(spread) => {
-                // Handle {...props} spread
-                let elem_id = elem_id
-                    .as_deref()
-                    .expect("Spread attributes require an element id");
-                context.register_helper("spread");
-                let callee = ident_expr(ast, spread.span, "spread");
-                let elem = ident_expr(ast, spread.span, elem_id);
-                let args = [
-                    elem,
-                    context.clone_expr(&spread.argument),
-                    ast.expression_boolean_literal(SPAN, result.is_svg),
-                    ast.expression_boolean_literal(SPAN, !element.children.is_empty()),
-                ];
-                result.exprs.push(call_expr(ast, spread.span, callee, args));
+    if !has_spread {
+        for attr in &element.opening_element.attributes {
+            match attr {
+                JSXAttributeItem::Attribute(attr) => {
+                    transform_attribute(attr, elem_id.as_deref(), result, context, options, ctx);
+                }
+                JSXAttributeItem::SpreadAttribute(spread) => {
+                    // Handle {...props} spread
+                    let elem_id = elem_id
+                        .as_deref()
+                        .expect("Spread attributes require an element id");
+                    context.register_helper("spread");
+                    let callee = ident_expr(ast, spread.span, "spread");
+                    let elem = ident_expr(ast, spread.span, elem_id);
+                    let args = [
+                        elem,
+                        context.clone_expr(&spread.argument),
+                        ast.expression_boolean_literal(SPAN, result.is_svg),
+                        ast.expression_boolean_literal(SPAN, !element.children.is_empty()),
+                    ];
+                    result.exprs.push(call_expr(ast, spread.span, callee, args));
+                }
             }
         }
+        return;
+    }
+
+    let elem_id = elem_id
+        .as_deref()
+        .expect("Spread attributes require an element id");
+
+    let mut merge_args: Vec<Expression<'a>> = Vec::new();
+    let mut inline_props: Vec<ObjectPropertyKind<'a>> = Vec::new();
+    let mut deferred_attrs: Vec<&JSXAttribute<'a>> = Vec::new();
+
+    for item in &element.opening_element.attributes {
+        match item {
+            JSXAttributeItem::SpreadAttribute(spread) => {
+                flush_inline_spread_props(ast, spread.span, &mut inline_props, &mut merge_args);
+                merge_args.push(context.clone_expr(&spread.argument));
+            }
+            JSXAttributeItem::Attribute(attr) => {
+                let key = get_attr_name(&attr.name);
+                if should_inline_attr_in_spread(&key) {
+                    push_attr_as_spread_prop(attr, &key, &mut inline_props, context);
+                } else {
+                    deferred_attrs.push(attr);
+                }
+            }
+        }
+    }
+
+    flush_inline_spread_props(ast, SPAN, &mut inline_props, &mut merge_args);
+
+    if !merge_args.is_empty() {
+        context.register_helper("spread");
+        let spread_props = if merge_args.len() == 1 {
+            merge_args
+                .pop()
+                .expect("single merge arg should exist after len check")
+        } else {
+            context.register_helper("mergeProps");
+            let mut args = ast.vec_with_capacity(merge_args.len());
+            for arg in merge_args {
+                args.push(Argument::from(arg));
+            }
+            ast.expression_call(
+                SPAN,
+                ident_expr(ast, SPAN, "mergeProps"),
+                None::<oxc_ast::ast::TSTypeParameterInstantiation<'a>>,
+                args,
+                false,
+            )
+        };
+
+        let args = [
+            ident_expr(ast, SPAN, elem_id),
+            spread_props,
+            ast.expression_boolean_literal(SPAN, result.is_svg),
+            ast.expression_boolean_literal(SPAN, !element.children.is_empty()),
+        ];
+        result
+            .exprs
+            .push(call_expr(ast, SPAN, ident_expr(ast, SPAN, "spread"), args));
+    }
+
+    for attr in deferred_attrs {
+        transform_attribute(attr, Some(elem_id), result, context, options, ctx);
     }
 }
 
