@@ -64,7 +64,7 @@ impl NoDestructure {
     fn check_params(
         &self,
         params: &oxc_ast::ast::FormalParameters,
-        params_span: oxc_span::Span,
+        _params_span: oxc_span::Span,
     ) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
 

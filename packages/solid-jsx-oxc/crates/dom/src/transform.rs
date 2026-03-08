@@ -347,7 +347,7 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
             // We check ALL imports (not just from module_name) because helpers like
             // `mergeProps` can be imported from either `solid-js` or `solid-js/web`.
             let mut existing_helper_locals = std::collections::HashSet::<String>::new();
-            let mut first_module_import_index: Option<usize> = None;
+            let mut first_augmentable_module_import_index: Option<usize> = None;
             for (i, stmt) in program.body.iter().enumerate() {
                 let Statement::ImportDeclaration(import_decl) = stmt else {
                     continue;
@@ -358,12 +358,19 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
 
                 let is_target_module = import_decl.source.value.as_str() == module_name;
 
-                // Track first import from target module for augmentation
-                if is_target_module
-                    && first_module_import_index.is_none()
-                    && import_decl.specifiers.is_some()
-                {
-                    first_module_import_index = Some(i);
+                // Track first import from target module that can be legally augmented.
+                // Only pure named imports are safe to augment. Mixing named with namespace
+                // (and in some toolchains default/namespace variants) can emit invalid JS.
+                if is_target_module && first_augmentable_module_import_index.is_none() {
+                    if let Some(specifiers) = &import_decl.specifiers {
+                        let all_named_specifiers = !specifiers.is_empty()
+                            && specifiers.iter().all(|spec| {
+                                matches!(spec, ImportDeclarationSpecifier::ImportSpecifier(_))
+                            });
+                        if all_named_specifiers {
+                            first_augmentable_module_import_index = Some(i);
+                        }
+                    }
                 }
 
                 // Collect ALL import bindings to avoid duplicate declarations
@@ -400,7 +407,7 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
 
             if !specifiers.is_empty() {
                 // Prefer augmenting the first existing import from the module to avoid extra imports.
-                if let Some(import_index) = first_module_import_index {
+                if let Some(import_index) = first_augmentable_module_import_index {
                     if let Statement::ImportDeclaration(import_decl) = &mut program.body[import_index]
                     {
                         let decl_specifiers =
@@ -443,7 +450,7 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
                 raw: ast.atom(part_str),
                 cooked: Some(ast.atom(part_str)),
             };
-            quasis.push(ast.template_element(tmpl_span, value, true));
+            quasis.push(ast.template_element(tmpl_span, value, true, true));
             let template_lit = ast.template_literal(tmpl_span, quasis, ast.vec());
             let template_expr = Expression::TemplateLiteral(ast.alloc(template_lit));
 

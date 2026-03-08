@@ -7,6 +7,7 @@
 //! 3. With type-aware analysis via tsgolint integration (future)
 
 pub mod rules;
+pub mod semantic_visitor;
 pub mod utils;
 pub mod visitor;
 mod context;
@@ -15,6 +16,10 @@ mod diagnostic;
 pub use context::LintContext;
 pub use diagnostic::{Diagnostic, DiagnosticSeverity, Fix};
 pub use rules::*;
+pub use semantic_visitor::{
+    lint_with_semantic, lint_with_semantic_config, SemanticLintResult, SemanticLintRunner,
+    SemanticRulesConfig,
+};
 pub use visitor::{lint, lint_with_config, LintResult, LintRunner, RulesConfig, VisitorLintContext};
 
 /// Rule category for Solid rules

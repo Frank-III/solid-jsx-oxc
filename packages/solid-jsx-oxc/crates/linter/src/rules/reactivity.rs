@@ -53,7 +53,7 @@ impl Reactivity {
 
     /// Check a variable declarator for signal/store destructuring issues
     pub fn check_variable<'a>(&self, declarator: &VariableDeclarator<'a>) -> Vec<Diagnostic> {
-        let mut diagnostics = Vec::new();
+        let diagnostics = Vec::new();
 
         let Some(init) = &declarator.init else {
             return diagnostics;
@@ -130,11 +130,11 @@ impl Reactivity {
     pub fn check_jsx_expression<'a>(
         &self,
         container: &JSXExpressionContainer<'a>,
-        is_in_attribute: bool,
+        _is_in_attribute: bool,
     ) -> Vec<Diagnostic> {
-        let mut diagnostics = Vec::new();
+        let diagnostics = Vec::new();
 
-        let Some(expr) = container.expression.as_expression() else {
+        let Some(_expr) = container.expression.as_expression() else {
             return diagnostics;
         };
 
