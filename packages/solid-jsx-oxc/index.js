@@ -5,6 +5,7 @@
  */
 
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 import { platform, arch } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -12,7 +13,7 @@ import { dirname, join } from 'node:path';
 const require = createRequire(import.meta.url);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// Map Node.js platform/arch to binary file suffix
+// Map Node.js platform/arch to NAPI target suffix
 const platformMap = {
   'darwin-arm64': 'darwin-arm64',
   'darwin-x64': 'darwin-x64',
@@ -25,21 +26,40 @@ const platformMap = {
 const platformKey = `${platform}-${arch}`;
 const nativeTarget = platformMap[platformKey];
 
-// Try to load the native module
+// Read our own package name from package.json so the sub-package lookup
+// works whether we were published as `solid-jsx-oxc` (upstream) or
+// `@aeolun/solid-jsx-oxc` (rescoped). publish-alpha.ts rewrites pkg.name
+// during rescope, and the matching sub-packages are
+// `<pkg.name>-<target>` (e.g. `@aeolun/solid-jsx-oxc-linux-arm64-gnu`).
+let pkgName = 'solid-jsx-oxc';
+try {
+  pkgName = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf-8')).name || pkgName;
+} catch {
+  // ignore — fall back to default
+}
+
 let nativeBinding = null;
 
-try {
-  if (nativeTarget) {
-    // Try platform-specific binary first
-    nativeBinding = require(join(__dirname, `solid-jsx-oxc.${nativeTarget}.node`));
-  } else {
-    // Fallback to generic name
-    nativeBinding = require(join(__dirname, 'solid-jsx-oxc.node'));
+if (nativeTarget) {
+  const subPackageName = `${pkgName}-${nativeTarget}`;
+  let firstError = null;
+  try {
+    // Production install: optionalDependencies installed only the matching
+    // platform sub-package, which we resolve by name.
+    nativeBinding = require(subPackageName);
+  } catch (e) {
+    firstError = e;
+    try {
+      // Dev / monorepo: a freshly-built .node lives next to index.js.
+      nativeBinding = require(join(__dirname, `solid-jsx-oxc.${nativeTarget}.node`));
+    } catch (e2) {
+      console.warn(`solid-jsx-oxc: Native module not found for ${platformKey}.`);
+      console.warn(`Tried sub-package "${subPackageName}":\n  ${firstError instanceof Error ? firstError.message : String(firstError)}`);
+      console.warn(`Tried local file:\n  ${e2 instanceof Error ? e2.message : String(e2)}`);
+    }
   }
-} catch (e) {
-  // Fallback message if native module not found
-  console.warn(`solid-jsx-oxc: Native module not found for ${platformKey}. Run \`npm run build\` to compile.`);
-  console.warn(e instanceof Error ? e.message : String(e));
+} else {
+  console.warn(`solid-jsx-oxc: Unsupported platform ${platformKey}.`);
 }
 
 /**

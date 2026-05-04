@@ -62,7 +62,7 @@ fn jsx_element_name_to_expression<'a>(
     }
 }
 
-fn getter_return_expr<'a>(
+pub(crate) fn getter_return_expr<'a>(
     ast: AstBuilder<'a>,
     span: oxc_span::Span,
     expr: Expression<'a>,
@@ -120,7 +120,7 @@ fn is_valid_prop_identifier(key: &str) -> bool {
     chars.all(|c| c == '$' || c == '_' || c.is_ascii_alphanumeric())
 }
 
-fn make_prop_key<'a>(ast: AstBuilder<'a>, span: oxc_span::Span, raw_key: &str) -> PropertyKey<'a> {
+pub(crate) fn make_prop_key<'a>(ast: AstBuilder<'a>, span: oxc_span::Span, raw_key: &str) -> PropertyKey<'a> {
     let _ = span;
     let key = ast.allocator.alloc_str(raw_key);
     if is_valid_prop_identifier(raw_key) {

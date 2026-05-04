@@ -59,12 +59,44 @@ pub struct TransformResult<'a> {
 
     /// Individual child codes for fragments (when children need to be in an array)
     pub child_results: Vec<TransformResult<'a>>,
+
+    /// Whether this subtree contains anything that may need post-hydration event
+    /// dispatch. Mirrors `results.hasHydratableEvent` in the Babel plugin: it is
+    /// set to true when an element has any spread attribute (because the
+    /// spread's contents are unknown at compile time and may include event
+    /// handlers), and propagates upward so the top-level element emits
+    /// `runHydrationEvents()` in `post_exprs`.
+    pub has_hydratable_event: bool,
 }
 
-/// A variable declaration
+/// A variable declaration.
+///
+/// When `pair` is `Some(second_name)`, this represents an array-destructure
+/// pattern: `const [name, second_name] = init`. Used for the
+/// `[marker, contentId] = getNextMarker(...)` pair emitted in hydratable
+/// DOM mode (mirrors Babel's `createPlaceholder` for `<!--/-->` markers).
 pub struct Declaration<'a> {
     pub name: String,
+    pub pair: Option<String>,
     pub init: Expression<'a>,
+}
+
+impl<'a> Declaration<'a> {
+    pub fn single(name: String, init: Expression<'a>) -> Self {
+        Self {
+            name,
+            pair: None,
+            init,
+        }
+    }
+
+    pub fn array_pair(first: String, second: String, init: Expression<'a>) -> Self {
+        Self {
+            name: first,
+            pair: Some(second),
+            init,
+        }
+    }
 }
 
 /// A dynamic attribute binding that needs effect wrapping
@@ -94,6 +126,13 @@ pub struct BlockContext<'a> {
     /// Variable counter for unique names
     pub var_counter: RefCell<usize>,
 
+    /// Whether to emit hydration-aware code. When true, `build_dom_output_expr`
+    /// emits `getNextElement(_tmpl$1)` instead of `_tmpl$1.cloneNode(true)` so
+    /// the runtime walks the SSR-produced DOM via `sharedConfig.registry`
+    /// instead of constructing a fresh tree (which the dev runtime catches
+    /// with `"Failed attempt to create new DOM elements during hydration"`).
+    pub hydratable: bool,
+
     allocator: &'a Allocator,
 }
 
@@ -105,12 +144,17 @@ pub struct TemplateInfo {
 
 impl<'a> BlockContext<'a> {
     pub fn new(allocator: &'a Allocator) -> Self {
+        Self::with_hydratable(allocator, false)
+    }
+
+    pub fn with_hydratable(allocator: &'a Allocator, hydratable: bool) -> Self {
         Self {
             template: RefCell::new(String::new()),
             templates: RefCell::new(Vec::new()),
             helpers: RefCell::new(IndexSet::new()),
             delegates: RefCell::new(IndexSet::new()),
             var_counter: RefCell::new(0),
+            hydratable,
             allocator,
         }
     }

@@ -1,0 +1,34 @@
+{
+  "name": "solid-jsx-oxc-win32-x64-msvc",
+  "version": "0.1.0-alpha.16",
+  "cpu": [
+    "x64"
+  ],
+  "main": "solid-jsx-oxc.win32-x64-msvc.node",
+  "files": [
+    "solid-jsx-oxc.win32-x64-msvc.node"
+  ],
+  "description": "OXC-based JSX compiler for SolidJS",
+  "keywords": [
+    "solid",
+    "solidjs",
+    "jsx",
+    "compiler",
+    "oxc",
+    "rust",
+    "napi",
+    "rolldown"
+  ],
+  "author": "SolidJS Contributors",
+  "license": "MIT",
+  "engines": {
+    "node": ">= 18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ryansolid/solid-jsx-oxc"
+  },
+  "os": [
+    "win32"
+  ]
+}

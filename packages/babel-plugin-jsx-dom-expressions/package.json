@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "@babel/helper-module-imports": "7.18.6",
-    "@babel/plugin-syntax-jsx": "^7.18.6",
+    "@babel/plugin-syntax-jsx": "^7.28.6",
     "@babel/types": "^7.20.7",
     "html-entities": "2.3.3",
     "parse5": "^7.1.2"
@@ -30,7 +30,9 @@
   },
   "devDependencies": {
     "@babel/core": "^7.20.12",
-    "@rollup/plugin-babel": "6.0.3",
+    "@babel/preset-typescript": "^7.28.5",
+    "@rollup/plugin-babel": "^7.0.0",
+    "@rollup/plugin-node-resolve": "^16.0.3",
     "@types/babel__core": "^7.20.5",
     "rollup": "^4.0.0"
   },

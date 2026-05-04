@@ -4,7 +4,7 @@
 use oxc_allocator::CloneIn;
 use oxc_ast::ast::{
     Argument, AssignmentTarget, Expression, FormalParameterKind, JSXAttribute, JSXAttributeItem,
-    JSXAttributeValue, JSXElement, Statement,
+    JSXAttributeValue, JSXElement, ObjectPropertyKind, PropertyKind, Statement,
 };
 use oxc_ast::AstBuilder;
 use oxc_ast::NONE;
@@ -16,9 +16,11 @@ use oxc_traverse::TraverseCtx;
 use common::{
     constants::{ALIASES, DELEGATED_EVENTS, VOID_ELEMENTS},
     expression::{escape_html, to_event_name},
-    get_attr_name, is_component, is_dynamic, is_namespaced_attr, is_svg_element, TransformOptions,
+    get_attr_name, is_component, is_dynamic, is_dynamic_for_spread, is_namespaced_attr,
+    is_svg_element, TransformOptions,
 };
 
+use crate::component::{getter_return_expr, make_prop_key};
 use crate::ir::{BlockContext, ChildTransformer, Declaration, DynamicBinding, TransformResult};
 use crate::transform::TransformInfo;
 
@@ -170,15 +172,13 @@ pub fn transform_element<'a, 'b>(
         // If we have a path, we need to walk to this element
         if !info.path.is_empty() {
             if let Some(root_id) = &info.root_id {
-                result.declarations.push(Declaration {
-                    name: elem_id.clone(),
-                    init: info
-                        .path
-                        .iter()
-                        .fold(ident_expr(ast, element.span, root_id), |acc, step| {
-                            static_member(ast, element.span, acc, step)
-                        }),
-                });
+                let init = info.path.iter().fold(
+                    ident_expr(ast, element.span, root_id),
+                    |acc, step| static_member(ast, element.span, acc, step),
+                );
+                result
+                    .declarations
+                    .push(Declaration::single(elem_id.clone(), init));
             }
         }
     }
@@ -224,6 +224,22 @@ pub fn transform_element<'a, 'b>(
         result
             .template_with_closing_tags
             .push_str(&format!("</{}>", tag_name));
+    }
+
+    // At the top of the JSX tree, emit `runHydrationEvents()` after all the
+    // setup expressions if anything in this subtree had a spread (or otherwise
+    // flagged a possibly-hydratable event). This mirrors babel's
+    //   if (info.topLevel && config.hydratable && results.hasHydratableEvent)
+    //     results.postExprs.push(callExpression(runHydrationEvents, []));
+    // The runtime needs this to flush deferred event handler attachments that
+    // hydration deferred while walking the SSR-emitted DOM.
+    if info.top_level && context.hydratable && result.has_hydratable_event {
+        context.register_helper("runHydrationEvents");
+        let ast = context.ast();
+        let callee = ident_expr(ast, element.span, "runHydrationEvents");
+        result
+            .post_exprs
+            .push(call_expr(ast, element.span, callee, []));
     }
 
     result
@@ -297,7 +313,38 @@ fn element_needs_runtime_access(element: &JSXElement) -> bool {
     false
 }
 
-/// Transform element attributes
+/// Whether an attribute key can be handled by the runtime `spread()` helper
+/// (i.e. folded into the merged props object) or whether it must be processed
+/// through a separate per-attr expression.
+///
+/// Mirrors `canNativeSpread` in `babel-plugin-jsx-dom-expressions`
+/// (`shared/utils.js`): the runtime `spread()` does not handle `ref` or
+/// attributes whose namespace is one of `class:`, `style:`, `use:`, `prop:`,
+/// `attr:`, `bool:`. Everything else (including `onClick`, `on:click`,
+/// `classList`, `style`) flows through.
+fn can_native_spread(key: &str) -> bool {
+    if key == "ref" {
+        return false;
+    }
+    if let Some((ns, _)) = key.split_once(':') {
+        const NON_SPREAD: &[&str] = &["class", "style", "use", "prop", "attr", "bool"];
+        if NON_SPREAD.contains(&ns) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Transform element attributes.
+///
+/// When the element has any spread attribute, this delegates to
+/// `process_spreads` (mirroring Babel's `processSpreads`) to fold every
+/// spreadable attribute into a single `spread(elem, mergeProps(...), isSVG,
+/// hasChildren)` call. Non-spreadable attrs (events with `on:`, refs,
+/// directives, `prop:`/`attr:`/`class:`/`style:` namespaces) fall through to
+/// the per-attribute handlers.
+///
+/// Without spreads, every attribute is processed individually as before.
 fn transform_attributes<'a>(
     element: &JSXElement<'a>,
     result: &mut TransformResult<'a>,
@@ -305,32 +352,244 @@ fn transform_attributes<'a>(
     options: &TransformOptions<'a>,
     ctx: &TraverseCtx<'a, ()>,
 ) {
-    let ast = context.ast();
     let elem_id = result.id.clone();
+
+    let has_spread = element
+        .opening_element
+        .attributes
+        .iter()
+        .any(|a| matches!(a, JSXAttributeItem::SpreadAttribute(_)));
+
+    if has_spread {
+        let elem_id_str = elem_id
+            .as_deref()
+            .expect("Spread attributes require an element id");
+        let filtered = process_spreads(
+            element,
+            elem_id_str,
+            result.is_svg,
+            !element.children.is_empty(),
+            result,
+            context,
+        );
+        for &i in &filtered {
+            if let JSXAttributeItem::Attribute(attr) = &element.opening_element.attributes[i] {
+                transform_attribute(attr, elem_id.as_deref(), result, context, options, ctx);
+            }
+        }
+        return;
+    }
 
     for attr in &element.opening_element.attributes {
         match attr {
             JSXAttributeItem::Attribute(attr) => {
                 transform_attribute(attr, elem_id.as_deref(), result, context, options, ctx);
             }
-            JSXAttributeItem::SpreadAttribute(spread) => {
-                // Handle {...props} spread
-                let elem_id = elem_id
-                    .as_deref()
-                    .expect("Spread attributes require an element id");
-                context.register_helper("spread");
-                let callee = ident_expr(ast, spread.span, "spread");
-                let elem = ident_expr(ast, spread.span, elem_id);
-                let args = [
-                    elem,
-                    context.clone_expr(&spread.argument),
-                    ast.expression_boolean_literal(SPAN, result.is_svg),
-                    ast.expression_boolean_literal(SPAN, !element.children.is_empty()),
-                ];
-                result.exprs.push(call_expr(ast, spread.span, callee, args));
+            JSXAttributeItem::SpreadAttribute(_) => {
+                unreachable!("has_spread branch handles spreads")
             }
         }
     }
+}
+
+/// Process attributes for an element that has at least one spread.
+///
+/// Walks the attribute list in source order and partitions each attribute:
+///
+/// * **Spreads** — flush any accumulated `running_object` into `spread_args`,
+///   then push the spread argument (wrapped in an arrow function if dynamic
+///   per Babel's `isDynamic({checkMember: true})`).
+/// * **Spreadable attrs** when either a spread has already been seen
+///   (`first_spread`) OR the attribute has a dynamic expression value:
+///   accumulate into `running_object`. Dynamic exprs become getter properties
+///   (`get key() { return expr; }`) so they remain reactive when read by the
+///   runtime; static strings/booleans become plain properties.
+/// * Everything else — push the attribute's index into `filtered` so the
+///   caller can run the existing per-attr transform (events, refs, directives,
+///   `prop:`/`attr:`/`class:`/`style:` namespaces).
+///
+/// Finally builds the props expression: a single object literal if there is
+/// exactly one non-dynamic spread arg; otherwise `mergeProps(...spread_args)`.
+/// Emits `spread(elem, props, isSVG, hasChildren)` and sets
+/// `result.has_hydratable_event = true` (we cannot know at compile time
+/// whether the spread contains an event handler).
+///
+/// Returns the indices of the original attributes that need separate
+/// per-attribute processing.
+fn process_spreads<'a>(
+    element: &JSXElement<'a>,
+    elem_id: &str,
+    is_svg: bool,
+    has_children: bool,
+    result: &mut TransformResult<'a>,
+    context: &BlockContext<'a>,
+) -> Vec<usize> {
+    let ast = context.ast();
+    let mut filtered: Vec<usize> = Vec::new();
+    let mut spread_args: Vec<Expression<'a>> = Vec::new();
+    let mut running_object: Vec<ObjectPropertyKind<'a>> = Vec::new();
+    let mut dynamic_spread = false;
+    let mut first_spread = false;
+
+    let flush_running =
+        |ast: AstBuilder<'a>,
+         running_object: &mut Vec<ObjectPropertyKind<'a>>,
+         spread_args: &mut Vec<Expression<'a>>| {
+            if running_object.is_empty() {
+                return;
+            }
+            let mut props = ast.vec();
+            for p in running_object.drain(..) {
+                props.push(p);
+            }
+            spread_args.push(ast.expression_object(SPAN, props));
+        };
+
+    for (i, attr) in element.opening_element.attributes.iter().enumerate() {
+        match attr {
+            JSXAttributeItem::SpreadAttribute(spread) => {
+                first_spread = true;
+                flush_running(ast, &mut running_object, &mut spread_args);
+                let arg_expr = context.clone_expr(&spread.argument);
+                // Babel uses `isDynamic({ checkMember: true, checkCallExpressions: true })`
+                // here — a plain identifier (e.g. `rest` from splitProps) is NOT
+                // wrapped in an arrow, so `mergeProps` reads its getters lazily and
+                // hydration-ID allocation matches Babel's order. See
+                // `is_dynamic_for_spread` in `crates/common/src/check.rs`.
+                let arg = if is_dynamic_for_spread(&spread.argument) {
+                    dynamic_spread = true;
+                    arrow_zero_params_return_expr(ast, spread.span, arg_expr)
+                } else {
+                    arg_expr
+                };
+                spread_args.push(arg);
+            }
+            JSXAttributeItem::Attribute(attr_inner) => {
+                let key = get_attr_name(&attr_inner.name);
+                // Match Babel: an attribute is "dynamic enough to fold into the
+                // merged props object" when its expression value is dynamic per
+                // `isDynamic({ checkMember: true, checkCallExpressions: true })`.
+                // Plain identifier values are treated as static here so they
+                // become regular `key: value` props (not getters).
+                let dyn_expr = matches!(
+                    &attr_inner.value,
+                    Some(JSXAttributeValue::ExpressionContainer(c))
+                        if c.expression
+                            .as_expression()
+                            .map(is_dynamic_for_spread)
+                            .unwrap_or(false)
+                );
+
+                if (first_spread || dyn_expr) && can_native_spread(&key) {
+                    let prop_key = make_prop_key(ast, attr_inner.span, &key);
+                    match &attr_inner.value {
+                        Some(JSXAttributeValue::ExpressionContainer(container)) => {
+                            if let Some(expr) = container.expression.as_expression() {
+                                if is_dynamic_for_spread(expr) {
+                                    let getter = getter_return_expr(
+                                        ast,
+                                        attr_inner.span,
+                                        context.clone_expr(expr),
+                                    );
+                                    running_object.push(
+                                        ast.object_property_kind_object_property(
+                                            SPAN,
+                                            PropertyKind::Get,
+                                            prop_key,
+                                            getter,
+                                            false,
+                                            false,
+                                            false,
+                                        ),
+                                    );
+                                } else {
+                                    running_object.push(
+                                        ast.object_property_kind_object_property(
+                                            SPAN,
+                                            PropertyKind::Init,
+                                            prop_key,
+                                            context.clone_expr(expr),
+                                            false,
+                                            false,
+                                            false,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        Some(JSXAttributeValue::StringLiteral(lit)) => {
+                            let value = ast.expression_string_literal(
+                                SPAN,
+                                ast.allocator.alloc_str(&lit.value),
+                                None,
+                            );
+                            running_object.push(ast.object_property_kind_object_property(
+                                SPAN,
+                                PropertyKind::Init,
+                                prop_key,
+                                value,
+                                false,
+                                false,
+                                false,
+                            ));
+                        }
+                        None => {
+                            // Boolean attribute (no value). Babel emits "" for
+                            // attribute-style keys (Properties.has(key) would
+                            // give a boolean true, but for the common case of
+                            // HTML boolean attrs the spread runtime treats ""
+                            // as truthy). Keep it as the empty-string literal
+                            // for parity with the most common Babel output.
+                            let value =
+                                ast.expression_string_literal(SPAN, ast.allocator.alloc_str(""), None);
+                            running_object.push(ast.object_property_kind_object_property(
+                                SPAN,
+                                PropertyKind::Init,
+                                prop_key,
+                                value,
+                                false,
+                                false,
+                                false,
+                            ));
+                        }
+                        _ => {}
+                    }
+                } else {
+                    filtered.push(i);
+                }
+            }
+        }
+    }
+
+    flush_running(ast, &mut running_object, &mut spread_args);
+
+    // Build the props expression handed to spread().
+    let props_expr = if spread_args.len() == 1 && !dynamic_spread {
+        spread_args.into_iter().next().unwrap()
+    } else {
+        context.register_helper("mergeProps");
+        let callee = ident_expr(ast, element.span, "mergeProps");
+        call_expr(ast, element.span, callee, spread_args)
+    };
+
+    context.register_helper("spread");
+    let spread_callee = ident_expr(ast, element.span, "spread");
+    let elem = ident_expr(ast, element.span, elem_id);
+    let is_svg_lit = ast.expression_boolean_literal(SPAN, is_svg);
+    let has_children_lit = ast.expression_boolean_literal(SPAN, has_children);
+    let spread_call = call_expr(
+        ast,
+        element.span,
+        spread_callee,
+        [elem, props_expr, is_svg_lit, has_children_lit],
+    );
+    result.exprs.push(spread_call);
+
+    // Babel: spread is opaque to the compiler — assume it could carry an event
+    // handler so the top-level element emits runHydrationEvents().
+    result.has_hydratable_event = true;
+
+    filtered
 }
 
 /// Transform a single attribute
@@ -1066,29 +1325,138 @@ fn transform_children<'a, 'b>(
     transform_child: ChildTransformer<'a, 'b>,
     ctx: &TraverseCtx<'a, ()>,
 ) {
-    fn child_path(base: &[String], node_index: usize) -> Vec<String> {
-        let mut path = base.to_vec();
-        path.push("firstChild".to_string());
-        for _ in 0..node_index {
-            path.push("nextSibling".to_string());
-        }
-        path
-    }
-
-    fn child_accessor<'a>(
-        ast: AstBuilder<'a>,
-        span: Span,
-        parent_id: &str,
+    /// Walker state for the children traversal. Mirrors Babel's `tempPath`
+    /// pattern: instead of always walking from the parent's `firstChild`,
+    /// we re-anchor the walker after every hydratable `<!/>` marker. This
+    /// is required because in hydratable mode the SSR DOM contains
+    /// variable-length content between each `<!--$-->/<!--/-->` marker pair.
+    /// Counting `nextSibling` hops from the parent's `firstChild` therefore
+    /// produces the wrong target — the walk must instead chain off the
+    /// most-recently-declared close marker.
+    ///
+    /// In non-hydratable mode the walker is never re-anchored, so this
+    /// degenerates to the previous "root.<path_prefix>.firstChild.nextSibling^N"
+    /// behavior — equivalent to the old `child_path(&info.path, node_index)`.
+    struct WalkerState {
+        /// Position counter for the next child to be emitted.
         node_index: usize,
-    ) -> Expression<'a> {
-        let mut expr = static_member(ast, span, ident_expr(ast, span, parent_id), "firstChild");
-        for _ in 0..node_index {
-            expr = static_member(ast, span, expr, "nextSibling");
-        }
-        expr
+        /// Whether the most recent text child still wants to merge with
+        /// adjacent text (mirrors Babel's `lastWasText`).
+        last_was_text: bool,
+        /// Variable name to chain accesses from. Initially the parent
+        /// element's id (or the topmost template root when the parent
+        /// element is itself static and undeclared); switches to the
+        /// close-marker id after every hydratable marker pair.
+        root: String,
+        /// Path segments from `root` to the parent element. Empty when
+        /// `root` is the parent itself; otherwise the inherited
+        /// `info.path` from the static-only ancestor chain. After
+        /// re-anchoring this is cleared (the close marker has no prefix
+        /// to its position).
+        path_prefix: Vec<String>,
+        /// Position of the anchor (the close marker) in the children
+        /// sequence. Unused while `is_parent` is true; after re-anchoring
+        /// it is the `node_index` of the close marker at the moment it
+        /// was declared, so subsequent accesses use
+        /// `nextSibling^(N - anchor)`.
+        anchor: usize,
+        /// `true` when `root` (after `path_prefix`) refers to the parent
+        /// element — the first hop into the children list is `firstChild`.
+        /// `false` when `root` is a sibling marker — the first hop is
+        /// `nextSibling` (the close marker has no children to descend
+        /// into; the next position is its sibling).
+        is_parent: bool,
     }
 
-    /// Check if children list is a single dynamic expression (no markers needed)
+    impl WalkerState {
+        /// Initial state for a children traversal. When the current
+        /// element has its own declared id, walker chains directly off
+        /// it (`path_prefix` empty). When it doesn't (e.g. static-only
+        /// nested element with no runtime needs), walker chains off the
+        /// inherited `info.root_id` with `info.path` as prefix —
+        /// matching the old `child_path(&info.path, …)` behavior.
+        fn from_info(result_id: Option<&str>, info: &TransformInfo) -> Self {
+            let (root, prefix) = match (result_id, info.root_id.as_deref()) {
+                (Some(id), _) => (id.to_string(), Vec::new()),
+                (None, Some(rid)) => (rid.to_string(), info.path.clone()),
+                (None, None) => (String::new(), Vec::new()),
+            };
+            Self {
+                node_index: 0,
+                last_was_text: false,
+                root,
+                path_prefix: prefix,
+                anchor: 0,
+                is_parent: true,
+            }
+        }
+
+        /// Build the path segments from `root` to `target_index`. For a
+        /// parent walker this is `path_prefix ++ ["firstChild",
+        /// "nextSibling"; N]`, for a sibling-anchored walker it is
+        /// `["nextSibling"; N - anchor]` (the `nextSibling`-only chain
+        /// because the close marker is itself a sibling, not the parent
+        /// of subsequent nodes).
+        fn path_to(&self, target_index: usize) -> Vec<String> {
+            if self.is_parent {
+                let mut path =
+                    Vec::with_capacity(self.path_prefix.len() + target_index + 1);
+                path.extend(self.path_prefix.iter().cloned());
+                path.push("firstChild".to_string());
+                for _ in 0..target_index {
+                    path.push("nextSibling".to_string());
+                }
+                path
+            } else {
+                let steps = target_index.saturating_sub(self.anchor);
+                let mut path = Vec::with_capacity(steps);
+                for _ in 0..steps {
+                    path.push("nextSibling".to_string());
+                }
+                path
+            }
+        }
+
+        /// Build the AST `Expression` for the access at `target_index`,
+        /// relative to the current walker root.
+        fn accessor<'a>(
+            &self,
+            ast: AstBuilder<'a>,
+            span: Span,
+            target_index: usize,
+        ) -> Expression<'a> {
+            let mut expr = ident_expr(ast, span, &self.root);
+            for step in self.path_to(target_index) {
+                expr = static_member(ast, span, expr, &step);
+            }
+            expr
+        }
+
+        /// Re-anchor the walker to a freshly-declared close marker, so
+        /// subsequent positional accesses chain off the marker rather
+        /// than from the parent. Only used in hydratable mode.
+        fn reanchor(&mut self, marker_id: String, anchor_index: usize) {
+            self.root = marker_id;
+            self.path_prefix = Vec::new();
+            self.anchor = anchor_index;
+            self.is_parent = false;
+        }
+    }
+
+    /// Check if children list is a single dynamic expression (no markers needed).
+    ///
+    /// A "single dynamic child" means the parent host element will receive
+    /// exactly one dynamically-inserted value at runtime and nothing else,
+    /// so the compiled `insert(parent, value)` call doesn't need a marker
+    /// argument and the template doesn't need a `<!>` placeholder. This
+    /// must mirror Babel's `checkLength` + insertion logic in
+    /// `babel-plugin-jsx-dom-expressions/src/dom/element.js`: a component
+    /// child counts as a single dynamic expression, not as static
+    /// "other content" — the whole point is that the component renders
+    /// dynamically into the parent.
+    ///
+    /// Native (lowercase) elements remain static template content and
+    /// disqualify the single-dynamic path.
     fn is_single_dynamic_child(children: &[oxc_ast::ast::JSXChild<'_>]) -> bool {
         let mut expr_count = 0;
         let mut other_content = false;
@@ -1101,8 +1469,16 @@ fn transform_children<'a, 'b>(
                         other_content = true;
                     }
                 }
-                oxc_ast::ast::JSXChild::Element(_) => {
-                    other_content = true;
+                oxc_ast::ast::JSXChild::Element(child_elem) => {
+                    let tag = common::get_tag_name(child_elem);
+                    if is_component(&tag) {
+                        // Component children are dynamic insertions, not
+                        // static template content. They count toward the
+                        // single-dynamic-child rule.
+                        expr_count += 1;
+                    } else {
+                        other_content = true;
+                    }
                 }
                 oxc_ast::ast::JSXChild::ExpressionContainer(container) => {
                     if container.expression.as_expression().is_some() {
@@ -1132,8 +1508,7 @@ fn transform_children<'a, 'b>(
         options: &TransformOptions<'a>,
         transform_child: ChildTransformer<'a, 'b>,
         ctx: &TraverseCtx<'a, ()>,
-        node_index: &mut usize,
-        last_was_text: &mut bool,
+        walker: &mut WalkerState,
         single_dynamic: bool,
     ) {
         let ast = context.ast();
@@ -1145,9 +1520,9 @@ fn transform_children<'a, 'b>(
                         let escaped = escape_html(&content, false);
                         result.template.push_str(&escaped);
                         result.template_with_closing_tags.push_str(&escaped);
-                        if !*last_was_text {
-                            *node_index += 1;
-                            *last_was_text = true;
+                        if !walker.last_was_text {
+                            walker.node_index += 1;
+                            walker.last_was_text = true;
                         }
                     }
                 }
@@ -1155,7 +1530,7 @@ fn transform_children<'a, 'b>(
                     let child_tag = common::get_tag_name(child_elem);
 
                     if is_component(&child_tag) {
-                        *last_was_text = false;
+                        walker.last_was_text = false;
                         if let (Some(parent_id), Some(child_result)) =
                             (result.id.as_deref(), transform_child(child))
                         {
@@ -1176,20 +1551,95 @@ fn transform_children<'a, 'b>(
                                     callee,
                                     [parent, child_expr],
                                 ));
+                            } else if context.hydratable {
+                                // Hydratable mode: emit a `<!$><!/>` marker
+                                // pair that mirrors the SSR output's
+                                // `<!--$-->...<!--/-->` boundary, and use
+                                // `getNextMarker` to walk the SSR-emitted
+                                // DOM between them. The 4-arg `insert(parent,
+                                // value, marker, current)` form gives the
+                                // runtime the existing hydrated content
+                                // array so it can replace it in place
+                                // instead of trying to create new nodes
+                                // (which the dev runtime catches as
+                                // "Failed attempt to create new DOM
+                                // elements during hydration").
+                                //
+                                // After emitting the close marker we
+                                // re-anchor the walker to it so the next
+                                // positional access chains off the close
+                                // marker. The SSR DOM has variable-length
+                                // content between each marker pair, so a
+                                // count-from-firstChild walk lands on the
+                                // wrong target after the first pair.
+                                result.template.push_str("<!$><!/>");
+                                result.template_with_closing_tags.push_str("<!$><!/>");
+
+                                let open_id = context.generate_uid("el$");
+                                let open_init = walker.accessor(
+                                    ast,
+                                    child_elem.span,
+                                    walker.node_index,
+                                );
+                                result
+                                    .declarations
+                                    .push(Declaration::single(open_id.clone(), open_init));
+
+                                context.register_helper("getNextMarker");
+                                let marker_id = context.generate_uid("el$");
+                                let content_id = context.generate_uid("co$");
+                                let next_sibling = static_member(
+                                    ast,
+                                    child_elem.span,
+                                    ident_expr(ast, child_elem.span, &open_id),
+                                    "nextSibling",
+                                );
+                                let getter = ident_expr(
+                                    ast,
+                                    child_elem.span,
+                                    "getNextMarker",
+                                );
+                                let getter_call = call_expr(
+                                    ast,
+                                    child_elem.span,
+                                    getter,
+                                    [next_sibling],
+                                );
+                                result.declarations.push(Declaration::array_pair(
+                                    marker_id.clone(),
+                                    content_id.clone(),
+                                    getter_call,
+                                ));
+
+                                let callee = ident_expr(ast, child_elem.span, "insert");
+                                let parent = ident_expr(ast, child_elem.span, parent_id);
+                                let child_expr = child_result.exprs[0].clone_in(ast.allocator);
+                                let marker = ident_expr(ast, child_elem.span, &marker_id);
+                                let content = ident_expr(ast, child_elem.span, &content_id);
+                                result.exprs.push(call_expr(
+                                    ast,
+                                    child_elem.span,
+                                    callee,
+                                    [parent, child_expr, marker, content],
+                                ));
+
+                                let close_index = walker.node_index + 1;
+                                walker.node_index += 2;
+                                walker.reanchor(marker_id, close_index);
                             } else {
                                 result.template.push_str("<!>");
                                 result.template_with_closing_tags.push_str("<!>");
 
                                 let marker_id = context.generate_uid("el$");
-                                result.declarations.push(Declaration {
-                                    name: marker_id.clone(),
-                                    init: child_accessor(
-                                        ast,
-                                        child_elem.span,
-                                        parent_id,
-                                        *node_index,
-                                    ),
-                                });
+                                let marker_init = walker.accessor(
+                                    ast,
+                                    child_elem.span,
+                                    walker.node_index,
+                                );
+                                result.declarations.push(Declaration::single(
+                                    marker_id.clone(),
+                                    marker_init,
+                                ));
 
                                 let callee = ident_expr(ast, child_elem.span, "insert");
                                 let parent = ident_expr(ast, child_elem.span, parent_id);
@@ -1202,17 +1652,24 @@ fn transform_children<'a, 'b>(
                                     [parent, child_expr, marker],
                                 ));
 
-                                *node_index += 1;
+                                walker.node_index += 1;
                             }
                         }
                         continue;
                     }
 
-                    *last_was_text = false;
+                    walker.last_was_text = false;
+                    // Build the child element's path from the walker's
+                    // current root (the parent element initially, or the
+                    // most recent close marker after a hydratable pair).
+                    // We also override `root_id` so the child's id init
+                    // expression is folded from the walker root rather
+                    // than the original template root.
+                    let child_path_segments = walker.path_to(walker.node_index);
                     let child_info = TransformInfo {
                         top_level: false,
-                        path: child_path(&info.path, *node_index),
-                        root_id: info.root_id.clone(),
+                        path: child_path_segments,
+                        root_id: Some(walker.root.clone()),
                         ..info.clone()
                     };
 
@@ -1240,14 +1697,15 @@ fn transform_children<'a, 'b>(
                     result.exprs.extend(child_result.exprs);
                     result.dynamics.extend(child_result.dynamics);
                     result.has_custom_element |= child_result.has_custom_element;
+                    result.has_hydratable_event |= child_result.has_hydratable_event;
 
-                    *node_index += 1;
+                    walker.node_index += 1;
                 }
                 oxc_ast::ast::JSXChild::ExpressionContainer(container) => {
                     if let (Some(parent_id), Some(expr)) =
                         (result.id.as_deref(), container.expression.as_expression())
                     {
-                        *last_was_text = false;
+                        walker.last_was_text = false;
                         context.register_helper("insert");
 
                         let insert_value = if is_dynamic(expr) {
@@ -1270,15 +1728,67 @@ fn transform_children<'a, 'b>(
                                 callee,
                                 [parent, insert_value],
                             ));
+                        } else if context.hydratable {
+                            // Hydratable mode: emit `<!$><!/>` marker pair
+                            // and a `[marker, content] = getNextMarker(...)`
+                            // destructure so the runtime can hydrate this
+                            // dynamic insertion against the SSR-emitted
+                            // `<!--$-->...<!--/-->` content. See the
+                            // matching component-child branch above for
+                            // the rationale and the walker re-anchor.
+                            result.template.push_str("<!$><!/>");
+                            result.template_with_closing_tags.push_str("<!$><!/>");
+
+                            let open_id = context.generate_uid("el$");
+                            let open_init =
+                                walker.accessor(ast, container.span, walker.node_index);
+                            result
+                                .declarations
+                                .push(Declaration::single(open_id.clone(), open_init));
+
+                            context.register_helper("getNextMarker");
+                            let marker_id = context.generate_uid("el$");
+                            let content_id = context.generate_uid("co$");
+                            let next_sibling = static_member(
+                                ast,
+                                container.span,
+                                ident_expr(ast, container.span, &open_id),
+                                "nextSibling",
+                            );
+                            let getter = ident_expr(ast, container.span, "getNextMarker");
+                            let getter_call =
+                                call_expr(ast, container.span, getter, [next_sibling]);
+                            result.declarations.push(Declaration::array_pair(
+                                marker_id.clone(),
+                                content_id.clone(),
+                                getter_call,
+                            ));
+
+                            let callee = ident_expr(ast, container.span, "insert");
+                            let parent = ident_expr(ast, container.span, parent_id);
+                            let marker = ident_expr(ast, container.span, &marker_id);
+                            let content = ident_expr(ast, container.span, &content_id);
+                            result.exprs.push(call_expr(
+                                ast,
+                                container.span,
+                                callee,
+                                [parent, insert_value, marker, content],
+                            ));
+
+                            let close_index = walker.node_index + 1;
+                            walker.node_index += 2;
+                            walker.reanchor(marker_id, close_index);
                         } else {
                             result.template.push_str("<!>");
                             result.template_with_closing_tags.push_str("<!>");
 
                             let marker_id = context.generate_uid("el$");
-                            result.declarations.push(Declaration {
-                                name: marker_id.clone(),
-                                init: child_accessor(ast, container.span, parent_id, *node_index),
-                            });
+                            let marker_init =
+                                walker.accessor(ast, container.span, walker.node_index);
+                            result.declarations.push(Declaration::single(
+                                marker_id.clone(),
+                                marker_init,
+                            ));
 
                             let callee = ident_expr(ast, container.span, "insert");
                             let parent = ident_expr(ast, container.span, parent_id);
@@ -1290,7 +1800,7 @@ fn transform_children<'a, 'b>(
                                 [parent, insert_value, marker],
                             ));
 
-                            *node_index += 1;
+                            walker.node_index += 1;
                         }
                     }
                 }
@@ -1303,8 +1813,7 @@ fn transform_children<'a, 'b>(
                         options,
                         transform_child,
                         ctx,
-                        node_index,
-                        last_was_text,
+                        walker,
                         single_dynamic,
                     );
                 }
@@ -1313,8 +1822,7 @@ fn transform_children<'a, 'b>(
         }
     }
 
-    let mut node_index = 0usize;
-    let mut last_was_text = false;
+    let mut walker = WalkerState::from_info(result.id.as_deref(), info);
     let single_dynamic = is_single_dynamic_child(&element.children);
     transform_children_list(
         &element.children,
@@ -1324,8 +1832,7 @@ fn transform_children<'a, 'b>(
         options,
         transform_child,
         ctx,
-        &mut node_index,
-        &mut last_was_text,
+        &mut walker,
         single_dynamic,
     );
 }

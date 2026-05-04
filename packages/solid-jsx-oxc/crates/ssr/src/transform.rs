@@ -4,8 +4,8 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Expression, ImportDeclarationSpecifier, ImportOrExportKind, JSXChild, JSXElement,
-    JSXExpressionContainer, JSXFragment, JSXText, ModuleExportName, Program, Statement,
+    ArrayExpressionElement, Expression, ImportDeclarationSpecifier, ImportOrExportKind, JSXChild,
+    JSXElement, JSXExpressionContainer, JSXFragment, JSXText, ModuleExportName, Program, Statement,
 };
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SPAN;
@@ -96,16 +96,78 @@ impl<'a> SSRTransform<'a> {
     }
 
     /// Transform a JSX fragment
+    ///
+    /// Mirrors Babel's `transformFragmentChildren` (in
+    /// `babel-plugin-jsx-dom-expressions/src/shared/fragment.js`): each child
+    /// is reduced to its own JS expression and the children are combined as
+    /// either a single expression (one child) or a JS *array literal* (two or
+    /// more children). The resulting expression replaces the JSXFragment
+    /// in-place.
+    ///
+    /// This is the load-bearing path for top-level fragments like
+    ///
+    ///   function AppRoutes() {
+    ///     return (
+    ///       <>
+    ///         <Route path="/" component={Home} />
+    ///         <Route path="/landing" component={Landing} />
+    ///         …
+    ///       </>
+    ///     );
+    ///   }
+    ///
+    /// Returning an `ssr` template literal here (i.e. just `result.merge`-ing
+    /// every child) would force each `<Route>` into `escape(createComponent(…))`,
+    /// stringifying them at template-construction time. The `Router` then
+    /// receives a string of HTML instead of an array of `Route` descriptors,
+    /// fails to build the route table, and renders nothing — which surfaces
+    /// as an empty `<main></main>` server-side.
     fn transform_fragment(&self, fragment: &JSXFragment<'a>) -> SSRResult<'a> {
+        let ast = self.context.ast();
+        let hydratable = self.context.hydratable && self.options.hydratable;
         let mut result = SSRResult::new();
         result.span = fragment.span;
 
+        // Reduce each child to a single JS expression. Empty/whitespace-only
+        // text nodes are dropped, matching `filterChildren` in Babel.
+        let mut child_exprs: Vec<Expression<'a>> = Vec::new();
         for child in &fragment.children {
-            if let Some(child_result) = self.transform_node(child) {
-                result.merge(child_result);
+            let child_result = match self.transform_node(child) {
+                Some(r) => r,
+                None => continue,
+            };
+            // Empty result (no template parts AND no values) → skip.
+            if child_result.template_values.is_empty()
+                && child_result.template_parts.iter().all(|p| p.is_empty())
+            {
+                continue;
             }
+            child_exprs.push(child_result.to_ssr_expression(&self.context, hydratable));
         }
 
+        if child_exprs.is_empty() {
+            // Empty fragment — leave the result empty (becomes `""` when
+            // realised). Babel similarly produces an empty array / no content.
+            return result;
+        }
+
+        let combined = if child_exprs.len() == 1 {
+            child_exprs.pop().unwrap()
+        } else {
+            // Multi-child fragment → JS array literal so Solid's renderer (and
+            // route-table walking) can iterate the children directly.
+            let mut elements = ast.vec_with_capacity(child_exprs.len());
+            for expr in child_exprs {
+                elements.push(ArrayExpressionElement::from(expr));
+            }
+            ast.expression_array(SPAN, elements)
+        };
+
+        // Push as a single dynamic value with no surrounding template parts.
+        // The short-circuit in `to_ssr_expression` will return `combined` bare
+        // when this result is realised at the call site (e.g. the `Router`'s
+        // `children` getter receives the array directly, not an `ssr` string).
+        result.push_dynamic(combined, false, false);
         result
     }
 
@@ -274,15 +336,15 @@ impl<'a> SSRTransform<'a> {
     fn build_ssr_expression(
         &self,
         result: &SSRResult<'a>,
-        ctx: &mut TraverseCtx<'a, ()>,
+        _ctx: &mut TraverseCtx<'a, ()>,
     ) -> Expression<'a> {
-        let ast = ctx.ast;
         let hydratable = self.context.hydratable && self.options.hydratable;
 
-        if !result.template_values.is_empty() {
-            self.context.register_helper("ssr");
-        }
-
-        result.to_ssr_expression(ast, hydratable)
+        // `to_ssr_expression` self-registers `ssr` and `escape` when it
+        // actually emits them (see `ir.rs`). We don't need to pre-register
+        // them here — the previous gate via `needs_ssr_wrapper()` was correct
+        // for this site but missed the other three sites that call
+        // `to_ssr_expression` directly.
+        result.to_ssr_expression(&self.context, hydratable)
     }
 }

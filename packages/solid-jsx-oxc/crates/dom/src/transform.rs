@@ -31,7 +31,7 @@ impl<'a> SolidTransform<'a> {
         Self {
             allocator,
             options,
-            context: BlockContext::new(allocator),
+            context: BlockContext::with_hydratable(allocator, options.hydratable),
         }
     }
 

@@ -8,6 +8,7 @@ oxc_ast = { workspace = true }
 oxc_span = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_codegen = { workspace = true }
+oxc_syntax = { workspace = true }
 
 phf = { workspace = true, features = ["macros"] }
 indexmap = { workspace = true }

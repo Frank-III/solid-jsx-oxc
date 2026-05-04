@@ -84,9 +84,19 @@ impl<'a> SSRResult<'a> {
         }
     }
 
-    /// Append a dynamic value
+    /// Append a dynamic value.
+    ///
+    /// Hydration markers (`<!--$-->`/`<!--/-->`) are NOT auto-emitted around
+    /// the value. Babel's `babel-plugin-jsx-dom-expressions` only wraps a
+    /// dynamic child with markers when its **parent element has more than one
+    /// meaningful child** ("multi" rule). Auto-marking every dynamic value
+    /// here would produce markers around solitary children which `getNextMarker`
+    /// then mis-locates, causing hydration mismatches and full client re-render.
+    /// Marker emission is therefore the parent's responsibility — see
+    /// `process_jsx_children` in `element.rs` which inserts explicit
+    /// `<!--$-->`/`<!--/-->` static parts when `multi && hydratable`.
     pub fn push_dynamic(&mut self, expr: Expression<'a>, is_attr: bool, skip_escape: bool) {
-        self.push_dynamic_with_marker(expr, is_attr, skip_escape, !is_attr)
+        self.push_dynamic_with_marker(expr, is_attr, skip_escape, false)
     }
 
     /// Append a dynamic value with explicit hydration marker control
@@ -145,7 +155,7 @@ impl<'a> SSRResult<'a> {
 
                     // Add hydration marker before dynamic content (not for attributes)
                     if hydratable && !val.is_attr && val.needs_hydration_marker {
-                        result.push_str("<!--#-->");
+                        result.push_str("<!--$-->");
                     }
 
                     result.push_str("${");
@@ -170,13 +180,89 @@ impl<'a> SSRResult<'a> {
         }
     }
 
-    pub fn to_ssr_expression(&self, ast: AstBuilder<'a>, hydratable: bool) -> Expression<'a> {
+    /// Returns true when `to_ssr_expression` will actually emit an `ssr`...``
+    /// tagged-template call (and therefore the `ssr` runtime helper must be
+    /// imported). Returns false for the trivial cases that short-circuit:
+    /// pure-static (just a string literal) and a single dynamic expression
+    /// with no static template content (returns the expression bare, matching
+    /// Babel's `if (!result.template) return result.exprs[0]`).
+    pub fn needs_ssr_wrapper(&self) -> bool {
+        if self.template_values.is_empty() {
+            return false;
+        }
+        if self.template_values.len() == 1
+            && self.template_parts.iter().all(|p| p.is_empty())
+            && !self.template_values[0].is_attr
+            && !self.template_values[0].needs_hydration_marker
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Lower the IR to its final JS expression. Registers the runtime helpers
+    /// (`ssr`, `escape`) it emits on `context` itself so every call site is
+    /// guaranteed-correct without having to re-derive what the IR will produce.
+    /// Without that self-registration, paths that bypass
+    /// `SSRTransform::build_ssr_expression` (native-element children in
+    /// `element.rs`, component children in `component.rs`, fragment children
+    /// in `transform.rs`) emit bare `ssr\`…\`` tagged templates whose `ssr`
+    /// import never gets added to the file — which surfaces at SSR runtime as
+    /// `ReferenceError: ssr is not defined` once the bundler renames or
+    /// deconflicts the import binding.
+    pub fn to_ssr_expression(
+        &self,
+        context: &SSRContext<'a>,
+        hydratable: bool,
+    ) -> Expression<'a> {
+        let ast = context.ast();
         let gen_span = SPAN;
 
         if self.template_values.is_empty() {
             let content = self.template_parts.join("");
             let allocated_str = ast.allocator.alloc_str(&content);
             return ast.expression_string_literal(gen_span, allocated_str, None);
+        }
+
+        // Babel-parity short-circuit (see `babel-plugin-jsx-dom-expressions`'s
+        // `createTemplate` in `src/ssr/template.js`):
+        //
+        //     if (!result.template) {
+        //       return result.exprs[0];
+        //     }
+        //
+        // When a JSX node has produced no static template content — only a
+        // single dynamic expression — return that expression directly. This
+        // matters for two distinct reasons:
+        //
+        // 1. Spread/`ssrElement(...)` shape: wrapping in `ssr`${expr}`` would
+        //    produce identical HTML, but parents that detect
+        //    `is_call_expression(ssrElement, ...)` to short-circuit instead see
+        //    a TaggedTemplate and take a different code path. In a hydratable
+        //    build that drift produces a different `getNextContextId()`
+        //    allocation order on the SSR vs DOM side and surfaces as
+        //      `Hydration Mismatch. Unable to find DOM nodes for hydration key`
+        //    even though the rendered HTML structure is identical.
+        //
+        // 2. Component laziness: a top-level `<MyComponent />` (or a single
+        //    component inside a fragment, or a JSX expression) becomes a bare
+        //    `createComponent(MyComponent, {})` call — NOT
+        //    `ssr`${escape(createComponent(MyComponent, {}))}``. The bare form
+        //    is what consumers expect when they pass JSX into a prop
+        //    (e.g. `<Show fallback={<MyComponent />}>`): they want a
+        //    component reference, not a synchronously-rendered HTML string.
+        //    Wrapping forces the component to render eagerly and breaks
+        //    Suspense semantics for any async resources inside.
+        //
+        // Babel does NOT check skip_escape here either — `if (!result.template)`
+        // is the entire check. Callers that need escape apply it themselves
+        // (via `transformChildren` for native-element children).
+        if self.template_values.len() == 1
+            && self.template_parts.iter().all(|p| p.is_empty())
+            && !self.template_values[0].is_attr
+            && !self.template_values[0].needs_hydration_marker
+        {
+            return self.template_values[0].expr.clone_in(ast.allocator);
         }
 
         // Build quasis (static template parts)
@@ -191,7 +277,7 @@ impl<'a> SSRResult<'a> {
             if i < self.template_values.len() {
                 let val = &self.template_values[i];
                 if hydratable && !val.is_attr && val.needs_hydration_marker {
-                    raw.push_str("<!--#-->");
+                    raw.push_str("<!--$-->");
                     closing_marker_prefix.push_str("<!--/-->");
                 }
             }
@@ -206,6 +292,14 @@ impl<'a> SSRResult<'a> {
             quasis.push(element);
         }
 
+        // We're definitely emitting an `ssr\`…\`` tagged template now — the
+        // two short-circuits above have returned. Register the helper here so
+        // every entry into this function gets a consistent import, regardless
+        // of whether the caller went through `build_ssr_expression` or called
+        // us directly (native-element children, component children, fragment
+        // children).
+        context.register_helper("ssr");
+
         // Build expressions (dynamic parts)
         let mut expressions = ast.vec();
         for val in &self.template_values {
@@ -213,6 +307,11 @@ impl<'a> SSRResult<'a> {
             let wrapped = if val.skip_escape {
                 expr
             } else {
+                // Same reasoning as `ssr` above: register `escape` whenever we
+                // actually emit an `escape(...)` call. Most call paths already
+                // pre-register it via `transform_expression_container`, but
+                // the IR is the source of truth for what's emitted.
+                context.register_helper("escape");
                 let callee = ast.expression_identifier(gen_span, "escape");
                 let mut args = ast.vec();
                 args.push(Argument::from(expr));

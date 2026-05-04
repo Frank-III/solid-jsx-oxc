@@ -211,9 +211,46 @@ bun publish-alpha.ts --tag beta --publish --yes
 #   --allow-dirty             Allow uncommitted changes
 #   --otp <code>              2FA code
 #   --list                    Show publish order and exit
+#   --rescope <scope>         Publish under a different npm scope (see below)
 ```
 
 The script generates an interactive HTML report with clickable npm package links at the end.
+
+#### Publishing under a different npm scope
+
+If you maintain a fork and want to publish under your own scope without
+committing the rename — so upstream PRs from your fork stay clean — use
+`--rescope`. The script rewrites each package's `name`, inter-package dep refs,
+and any bare imports in published files (`dist/`, shipped `src/`) just before
+`bun publish`, then restores the working tree afterward (even on error or Ctrl+C).
+
+The set of packages that get rescoped is configured in the root `package.json`:
+
+```jsonc
+"rescope": {
+  "@aeolun": [
+    "solid-jsx-oxc",
+    "vite-plugin-solid-oxc",
+    "rolldown-plugin-solid-oxc",
+    "bun-plugin-solid-oxc"
+  ]
+}
+```
+
+Then publish:
+
+```bash
+# First publish of a scoped package needs --access public.
+bun publish-alpha.ts --rescope @aeolun --publish --access public
+
+# Or via the convenience script:
+bun run publish:scoped --publish
+```
+
+`workspace:*` dep specifiers are resolved to concrete versions during the
+rescope (because the workspace name itself changes — bun can no longer follow
+`workspace:` after the rewrite). Packages outside the rescope list (e.g.
+upstream forks like `dom-expressions`) are not touched and not published.
 
 ## License
 

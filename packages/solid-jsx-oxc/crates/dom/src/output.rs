@@ -65,6 +65,42 @@ fn const_decl_stmt<'a>(
     ))
 }
 
+/// `const [first, second] = init;` — array-destructure declaration. Used to
+/// emit the `[marker, contentId] = getNextMarker(...)` pair that mirrors
+/// Babel's `createPlaceholder("/")` in hydratable DOM mode.
+fn const_decl_pair_stmt<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    first: &str,
+    second: &str,
+    init: Expression<'a>,
+) -> Statement<'a> {
+    let mut elements = ast.vec_with_capacity(2);
+    elements.push(Some(
+        ast.binding_pattern_binding_identifier(span, ast.allocator.alloc_str(first)),
+    ));
+    elements.push(Some(
+        ast.binding_pattern_binding_identifier(span, ast.allocator.alloc_str(second)),
+    ));
+    let pattern =
+        ast.binding_pattern_array_pattern(span, elements, NONE);
+
+    let declarator = ast.variable_declarator(
+        span,
+        VariableDeclarationKind::Const,
+        pattern,
+        NONE,
+        Some(init),
+        false,
+    );
+    Statement::VariableDeclaration(ast.alloc_variable_declaration(
+        span,
+        VariableDeclarationKind::Const,
+        ast.vec1(declarator),
+        false,
+    ))
+}
+
 fn arrow_zero_params_body<'a>(
     ast: AstBuilder<'a>,
     span: Span,
@@ -123,28 +159,52 @@ pub fn build_dom_output_expr<'a>(
 
         let mut statements = ast.vec();
 
-        // const _el$ = _tmpl$1.cloneNode(true);
-        let clone_call = call_expr(
-            ast,
-            gen_span,
-            static_member(
+        // Hydratable: `const _el$ = getNextElement(_tmpl$1);`
+        // Non-hydratable: `const _el$ = _tmpl$1.cloneNode(true);`
+        //
+        // In hydratable mode the runtime must walk the SSR-emitted DOM via
+        // `sharedConfig.registry` (keyed off `data-hk` on the existing nodes)
+        // instead of cloning a fresh tree from the template. Without
+        // `getNextElement` every component's compiled output calls
+        // `cloneNode` unconditionally, which `solid-js/web` dev runtime
+        // catches inside `template()` and throws "Failed attempt to create
+        // new DOM elements during hydration". In production it silently
+        // re-renders the entire page client-side, defeating SSR.
+        let create_call = if context.hydratable {
+            context.register_helper("getNextElement");
+            call_expr(
                 ast,
                 gen_span,
-                ident_expr(ast, gen_span, &tmpl_var),
-                "cloneNode",
-            ),
-            [ast.expression_boolean_literal(gen_span, true)],
-        );
-        statements.push(const_decl_stmt(ast, gen_span, &elem_var, clone_call));
+                ident_expr(ast, gen_span, "getNextElement"),
+                [ident_expr(ast, gen_span, &tmpl_var)],
+            )
+        } else {
+            call_expr(
+                ast,
+                gen_span,
+                static_member(
+                    ast,
+                    gen_span,
+                    ident_expr(ast, gen_span, &tmpl_var),
+                    "cloneNode",
+                ),
+                [ast.expression_boolean_literal(gen_span, true)],
+            )
+        };
+        statements.push(const_decl_stmt(ast, gen_span, &elem_var, create_call));
 
         // const child = _el$.firstChild.nextSibling;
+        // (or `const [marker, contentId] = getNextMarker(...);` for the
+        // hydratable `<!/>` placeholder pair.)
         for decl in &result.declarations {
-            statements.push(const_decl_stmt(
-                ast,
-                gen_span,
-                &decl.name,
-                decl.init.clone_in(ast.allocator),
-            ));
+            let init = decl.init.clone_in(ast.allocator);
+            let stmt = match &decl.pair {
+                None => const_decl_stmt(ast, gen_span, &decl.name, init),
+                Some(second) => {
+                    const_decl_pair_stmt(ast, gen_span, &decl.name, second, init)
+                }
+            };
+            statements.push(stmt);
         }
 
         // Expressions (effects, inserts, etc.)

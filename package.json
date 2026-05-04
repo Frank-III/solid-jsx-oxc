@@ -17,9 +17,22 @@
     "clean": "rimraf node_modules packages/*/node_modules packages/*/dist",
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
-    "jsx-sync-types": "node packages/dom-expressions/src/jsx-update.mjs"
+    "jsx-sync-types": "node packages/dom-expressions/src/jsx-update.mjs",
+    "publish:scoped": "bun publish-alpha.ts --rescope @aeolun --access public"
+  },
+  "rescope": {
+    "_comment": "Used by `bun publish-alpha.ts --rescope <scope>`. Lists workspace packages whose `name` and inter-package dep refs get rewritten under <scope> just before publish, and restored after. Lets the source tree stay upstream-compatible.",
+    "@aeolun": [
+      "solid-jsx-oxc",
+      "vite-plugin-solid-oxc",
+      "rolldown-plugin-solid-oxc",
+      "bun-plugin-solid-oxc"
+    ]
   },
   "devDependencies": {
+    "@babel/core": "^7.29.0",
+    "@babel/preset-typescript": "^7.28.5",
+    "oxc-parser": "^0.128.0",
     "rimraf": "^5.0.0",
     "typescript": "~5.3.3"
   }

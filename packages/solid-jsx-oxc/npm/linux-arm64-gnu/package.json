@@ -1,0 +1,37 @@
+{
+  "name": "solid-jsx-oxc-linux-arm64-gnu",
+  "version": "0.1.0-alpha.16",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "solid-jsx-oxc.linux-arm64-gnu.node",
+  "files": [
+    "solid-jsx-oxc.linux-arm64-gnu.node"
+  ],
+  "description": "OXC-based JSX compiler for SolidJS",
+  "keywords": [
+    "solid",
+    "solidjs",
+    "jsx",
+    "compiler",
+    "oxc",
+    "rust",
+    "napi",
+    "rolldown"
+  ],
+  "author": "SolidJS Contributors",
+  "license": "MIT",
+  "engines": {
+    "node": ">= 18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ryansolid/solid-jsx-oxc"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}

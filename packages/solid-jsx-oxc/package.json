@@ -1,6 +1,6 @@
 {
   "name": "solid-jsx-oxc",
-  "version": "0.1.0-alpha.15",
+  "version": "0.1.0-alpha.16",
   "description": "OXC-based JSX compiler for SolidJS",
   "type": "module",
   "main": "index.js",
@@ -14,8 +14,7 @@
   "files": [
     "index.js",
     "index.d.ts",
-    "binding.d.ts",
-    "*.node"
+    "binding.d.ts"
   ],
   "repository": {
     "type": "git",
@@ -61,6 +60,14 @@
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.5.0"
+  },
+  "optionalDependencies": {
+    "solid-jsx-oxc-darwin-arm64": "0.1.0-alpha.16",
+    "solid-jsx-oxc-darwin-x64": "0.1.0-alpha.16",
+    "solid-jsx-oxc-linux-arm64-gnu": "0.1.0-alpha.16",
+    "solid-jsx-oxc-linux-x64-gnu": "0.1.0-alpha.16",
+    "solid-jsx-oxc-win32-arm64-msvc": "0.1.0-alpha.16",
+    "solid-jsx-oxc-win32-x64-msvc": "0.1.0-alpha.16"
   },
   "engines": {
     "node": ">= 18"

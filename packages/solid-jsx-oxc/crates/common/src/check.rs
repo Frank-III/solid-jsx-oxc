@@ -112,6 +112,104 @@ pub fn is_dynamic(expr: &Expression) -> bool {
     }
 }
 
+/// Babel-parity dynamism check used for spread-arg arrow-wrapping and for the
+/// getter-vs-plain-prop decision when folding attributes into the merged-props
+/// object.
+///
+/// Mirrors `isDynamic(path, { checkMember: true, checkCallExpressions: true })`
+/// in `babel-plugin-jsx-dom-expressions/src/shared/utils.js`. The crucial
+/// difference from the conservative `is_dynamic` above: a **plain Identifier
+/// is NOT considered dynamic here**. Babel only treats an expression as
+/// "dynamic for spread purposes" when it is one of:
+///
+/// - CallExpression / OptionalCallExpression / TaggedTemplateExpression
+/// - MemberExpression (static or computed) / OptionalMemberExpression
+/// - SpreadElement (recurse into argument)
+/// - BinaryExpression with operator `in`
+///
+/// Anything else — including a bare identifier reference — is treated as
+/// static. This matters because `mergeProps(rest, ...)` reads `rest`'s getters
+/// lazily on every property access, which preserves reactivity for splitProps
+/// proxies; wrapping it as `() => rest` and emitting `mergeProps(() => rest, ...)`
+/// changes the access timing and shifts hydration-ID allocation order, which
+/// surfaces as `Hydration Mismatch. Unable to find DOM nodes for hydration key`.
+pub fn is_dynamic_for_spread(expr: &Expression) -> bool {
+    use oxc_ast::ast::{ArrayExpressionElement, ObjectPropertyKind, PropertyKey};
+    use oxc_syntax::operator::BinaryOperator;
+    match expr {
+        // Functions are static *references*; their bodies are not walked.
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => false,
+
+        // Direct dynamic forms.
+        Expression::CallExpression(_) => true,
+        Expression::TaggedTemplateExpression(_) => true,
+        Expression::StaticMemberExpression(_)
+        | Expression::ComputedMemberExpression(_)
+        | Expression::PrivateFieldExpression(_) => true,
+        Expression::ChainExpression(_) => true, // optional call / optional member
+        Expression::UpdateExpression(_) => true,
+
+        // BinaryExpression: `in` is dynamic by rule; otherwise recurse.
+        Expression::BinaryExpression(b) => {
+            matches!(b.operator, BinaryOperator::In)
+                || is_dynamic_for_spread(&b.left)
+                || is_dynamic_for_spread(&b.right)
+        }
+        Expression::LogicalExpression(l) => {
+            is_dynamic_for_spread(&l.left) || is_dynamic_for_spread(&l.right)
+        }
+        Expression::ConditionalExpression(c) => {
+            is_dynamic_for_spread(&c.test)
+                || is_dynamic_for_spread(&c.consequent)
+                || is_dynamic_for_spread(&c.alternate)
+        }
+        Expression::UnaryExpression(u) => is_dynamic_for_spread(&u.argument),
+        Expression::AssignmentExpression(a) => is_dynamic_for_spread(&a.right),
+        Expression::SequenceExpression(s) => s.expressions.iter().any(is_dynamic_for_spread),
+
+        // Object / array / template literals: dynamic if any descendant is.
+        Expression::ObjectExpression(o) => o.properties.iter().any(|p| match p {
+            ObjectPropertyKind::ObjectProperty(prop) => {
+                // Computed key may itself contain a dynamic expression.
+                let key_dyn = if prop.computed {
+                    match &prop.key {
+                        PropertyKey::StaticIdentifier(_)
+                        | PropertyKey::StringLiteral(_)
+                        | PropertyKey::NumericLiteral(_) => false,
+                        other => other
+                            .as_expression()
+                            .map(is_dynamic_for_spread)
+                            .unwrap_or(false),
+                    }
+                } else {
+                    false
+                };
+                key_dyn || is_dynamic_for_spread(&prop.value)
+            }
+            ObjectPropertyKind::SpreadProperty(spread) => is_dynamic_for_spread(&spread.argument),
+        }),
+        Expression::ArrayExpression(a) => a.elements.iter().any(|el| match el {
+            ArrayExpressionElement::SpreadElement(s) => is_dynamic_for_spread(&s.argument),
+            ArrayExpressionElement::Elision(_) => false,
+            _ => el
+                .as_expression()
+                .map(is_dynamic_for_spread)
+                .unwrap_or(false),
+        }),
+        Expression::TemplateLiteral(t) => t.expressions.iter().any(is_dynamic_for_spread),
+
+        // TS wrappers / parens — recurse through.
+        Expression::TSAsExpression(e) => is_dynamic_for_spread(&e.expression),
+        Expression::TSSatisfiesExpression(e) => is_dynamic_for_spread(&e.expression),
+        Expression::TSNonNullExpression(e) => is_dynamic_for_spread(&e.expression),
+        Expression::TSTypeAssertion(e) => is_dynamic_for_spread(&e.expression),
+        Expression::ParenthesizedExpression(e) => is_dynamic_for_spread(&e.expression),
+
+        // Plain identifier, literals, `this`, `super`, JSX, etc. — static here.
+        _ => false,
+    }
+}
+
 /// Find a JSX attribute by name on an element.
 ///
 /// Returns the attribute if found, allowing access to both the name and value.

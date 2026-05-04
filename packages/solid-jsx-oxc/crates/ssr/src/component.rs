@@ -3,6 +3,7 @@
 //! Components in SSR are rendered using `createComponent`. Like DOM mode, we build a props object
 //! where dynamic values are exposed as getters so they're evaluated inside reactive contexts.
 
+use oxc_allocator::CloneIn;
 use oxc_ast::ast::{
     Argument, ArrayExpressionElement, Expression, FormalParameterKind, FunctionType,
     JSXAttributeItem, JSXAttributeName, JSXAttributeValue, JSXChild, JSXElement, JSXElementName,
@@ -60,7 +61,7 @@ fn jsx_element_name_to_expression<'a>(
     }
 }
 
-fn getter_return_expr<'a>(
+pub(crate) fn getter_return_expr<'a>(
     ast: AstBuilder<'a>,
     span: oxc_span::Span,
     expr: Expression<'a>,
@@ -97,7 +98,7 @@ fn is_valid_prop_identifier(key: &str) -> bool {
     chars.all(|c| c == '$' || c == '_' || c.is_ascii_alphanumeric())
 }
 
-fn make_prop_key<'a>(ast: AstBuilder<'a>, span: oxc_span::Span, raw_key: &str) -> PropertyKey<'a> {
+pub(crate) fn make_prop_key<'a>(ast: AstBuilder<'a>, span: oxc_span::Span, raw_key: &str) -> PropertyKey<'a> {
     let _ = span;
     let key = ast.allocator.alloc_str(raw_key);
     if is_valid_prop_identifier(raw_key) {
@@ -119,12 +120,25 @@ fn get_children_ssr<'a, 'b>(
     for child in &element.children {
         match child {
             JSXChild::Text(text) => {
+                // Component children: Babel's `transformComponentChildren`
+                // decodes JSX entities and pushes a plain string literal
+                // (no HTML escape) — see
+                // `babel-plugin-jsx-dom-expressions/src/shared/component.js`:
+                //   const v = decode(trimWhitespace(path.node.extra.raw));
+                //   memo.push(t.stringLiteral(v));
+                // The previous implementation called `escape_html` here,
+                // which turned every `&` in component-children text into
+                // `&amp;`. The downstream SSR runtime's `escape()` then
+                // would ALSO see `&amp;` and convert it to `&amp;amp;` if
+                // the component happened to interpolate the value, surfacing
+                // as visibly mangled text in the page. Match Babel: decode,
+                // no escape.
                 let content = common::expression::trim_whitespace(&text.value);
                 if !content.is_empty() {
-                    let escaped = common::expression::escape_html(&content, false);
+                    let decoded = common::expression::decode_jsx_entities(&content);
                     children.push(ast.expression_string_literal(
                         SPAN,
-                        ast.allocator.alloc_str(&escaped),
+                        ast.allocator.alloc_str(&decoded),
                         None,
                     ));
                 }
@@ -137,7 +151,43 @@ fn get_children_ssr<'a, 'b>(
             JSXChild::Element(_) | JSXChild::Fragment(_) => {
                 // Transform the child JSX element/fragment
                 if let Some(result) = transform_child(child) {
-                    children.push(result.to_ssr_expression(ast, false));
+                    // The child is being passed as a component's `children`
+                    // prop (this function is `get_children_ssr` for a
+                    // *component* parent). Babel's behavior here is to pass
+                    // each child through bare, NOT wrap component children in
+                    // `escape(createComponent(...))`. The reason matters:
+                    //
+                    //   <Switch>
+                    //     <Match when={...}>...</Match>
+                    //     <Match when={...}>...</Match>
+                    //   </Switch>
+                    //
+                    // `Switch`'s runtime introspects `props.children` to find
+                    // each `Match` descriptor and pick the first whose `when`
+                    // is truthy. If we wrap each `<Match>` in
+                    // `ssr`${escape(createComponent(Match, …))}``, the
+                    // `escape(createComponent(...))` is evaluated immediately
+                    // — the Match component runs and returns an HTMLString,
+                    // and `Switch` only sees an array of strings. It can't
+                    // find any Match, so it falls through to its fallback.
+                    //
+                    // The shape we want is the same one `to_ssr_expression`
+                    // already produces for `skip_escape: true` single-dynamic
+                    // results: bare `expr` with no `escape` wrapper. Detect
+                    // that case here regardless of `skip_escape` (component
+                    // results have `skip_escape: false` because they DO need
+                    // escape when they're rendered as a *native element*'s
+                    // child, but for component-children context they don't).
+                    let extracted = if result.template_values.len() == 1
+                        && result.template_parts.iter().all(|p| p.is_empty())
+                        && !result.template_values[0].is_attr
+                        && !result.template_values[0].needs_hydration_marker
+                    {
+                        result.template_values[0].expr.clone_in(ast.allocator)
+                    } else {
+                        result.to_ssr_expression(context, context.hydratable)
+                    };
+                    children.push(extracted);
                 }
             }
             JSXChild::Spread(spread) => {
@@ -224,8 +274,13 @@ fn build_props<'a, 'b>(
                 };
                 let key = make_prop_key(ast, span, &raw_key);
 
-                // Skip event handlers and refs in SSR
-                if raw_key.starts_with("on") || raw_key == "ref" || raw_key.starts_with("use:") {
+                // Skip refs only in SSR — refs target real DOM nodes which don't
+                // exist server-side. `on*` and `use:` are NOT skipped here:
+                // those are normal component props that the receiving component
+                // may forward onto its underlying element. Mirrors
+                // babel-plugin-jsx-dom-expressions/src/shared/component.js where
+                // only `ref` is `return`ed under `config.generate === "ssr"`.
+                if raw_key == "ref" {
                     continue;
                 }
 

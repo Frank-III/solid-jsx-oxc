@@ -1,0 +1,7 @@
+function Btn(allProps: any) {
+  return <button {...allProps} class="primary" />;
+}
+
+export default function App() {
+  return <Btn type="button" data-foo="bar">click</Btn>;
+}

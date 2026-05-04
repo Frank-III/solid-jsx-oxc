@@ -1,0 +1,136 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'npm dist-tag (e.g. alpha, beta, latest)'
+        required: false
+        default: 'alpha'
+      rescope:
+        description: 'npm scope to publish under (must be configured in package.json `rescope`)'
+        required: false
+        default: '@aeolun'
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  MACOSX_DEPLOYMENT_TARGET: '10.13'
+
+jobs:
+  build:
+    name: build (${{ matrix.settings.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - target: x86_64-apple-darwin
+            flags: '-x'
+          - target: aarch64-apple-darwin
+            flags: '-x'
+          - target: x86_64-pc-windows-msvc
+            flags: '-x'
+          - target: aarch64-pc-windows-msvc
+            flags: '-x'
+          - target: x86_64-unknown-linux-gnu
+            flags: '--use-napi-cross'
+          - target: aarch64-unknown-linux-gnu
+            flags: '--use-napi-cross'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+      - uses: taiki-e/install-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tool: cargo-zigbuild,cargo-xwin
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: oven-sh/setup-bun@v2
+      - name: Install deps
+        run: bun install --ignore-scripts
+      - name: Build native addon
+        working-directory: packages/solid-jsx-oxc
+        run: |
+          bunx @napi-rs/cli build --platform --release --features napi --no-js --dts binding.d.ts \
+            --target ${{ matrix.settings.target }} ${{ matrix.settings.flags }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: packages/solid-jsx-oxc/*.node
+          if-no-files-found: error
+
+  publish:
+    name: publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    # Trusted publishing requires the workflow to be able to mint OIDC
+    # ID tokens. Inherits from the workflow-level `permissions:` block
+    # at the top of this file (contents: read, id-token: write).
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      # Trusted publishing requires npm CLI >= 11.5.1 (which needs Node >= 22.14).
+      # See https://docs.npmjs.com/trusted-publishers
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+      - name: Show npm version
+        run: npm --version
+      - uses: oven-sh/setup-bun@v2
+      - name: Install deps
+        run: bun install --ignore-scripts
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: packages/solid-jsx-oxc
+          pattern: bindings-*
+          merge-multiple: true
+      - name: List binaries
+        run: ls -la packages/solid-jsx-oxc/*.node
+      - name: Build TS plugins
+        run: |
+          bun run --cwd packages/vite-plugin-solid-oxc build
+          bun run --cwd packages/rolldown-plugin-solid-oxc build
+      # Trusted publishing: no NPM_TOKEN required. The npm CLI reads the OIDC
+      # ID token from $ACTIONS_ID_TOKEN_REQUEST_URL / $ACTIONS_ID_TOKEN_REQUEST_TOKEN
+      # (set automatically when `id-token: write` is granted) and exchanges it
+      # for a short-lived publish token via npm's OIDC endpoint. Each package
+      # being published must have this workflow registered as a trusted
+      # publisher on npmjs.com.
+      - name: Publish (rescope ${{ github.event.inputs.rescope || '@aeolun' }})
+        run: |
+          bun publish-alpha.ts \
+            --rescope "${{ github.event.inputs.rescope || '@aeolun' }}" \
+            --tag "${{ github.event.inputs.tag || 'alpha' }}" \
+            --publish --yes \
+            --publisher npm \
+            --access public \
+            --skip-build \
+            --allow-dirty \
+            --tolerate-republish
+      - name: Upload publish report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-report
+          path: publish-report.html
+          if-no-files-found: ignore
